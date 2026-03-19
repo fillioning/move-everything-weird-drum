@@ -115,31 +115,39 @@ static int env_active(const wd_envelope_t *e) {
     return e->state != ENV_IDLE;
 }
 
-/* ── Phase Accumulator Oscillator ── */
+/* ── Phase Accumulator Oscillator with continuous waveform morphing ──
+ * wave 0.0 = sine, 0.33 = triangle, 0.66 = sawtooth, 1.0 = square
+ * Crossfades smoothly between adjacent waveforms */
 typedef struct {
     float phase;      /* 0..1 */
-    int   waveform;   /* 0=sine, 1=saw, 2=square */
 } wd_osc_t;
 
 static void osc_reset(wd_osc_t *o) { o->phase = 0.0f; }
 
-static float osc_next(wd_osc_t *o, float freq) {
+static float osc_next(wd_osc_t *o, float freq, float wave) {
+    float p = o->phase;
+
+    /* Generate all 4 waveforms from phase */
+    float sine = sinf(p * TWO_PI);
+    float tri  = (p < 0.5f) ? (4.0f * p - 1.0f) : (3.0f - 4.0f * p);
+    float saw  = 2.0f * p - 1.0f;
+    float sqr  = (p < 0.5f) ? 1.0f : -1.0f;
+
+    /* Morph: crossfade between adjacent waveforms */
     float out;
-    float p = o->phase * TWO_PI;
-    switch (o->waveform) {
-        case 1:  /* saw: linear ramp -1..+1 */
-            out = 2.0f * o->phase - 1.0f;
-            break;
-        case 2:  /* square: sign of sine */
-            out = sinf(p) >= 0.0f ? 1.0f : -1.0f;
-            break;
-        default: /* sine */
-            out = sinf(p);
-            break;
+    float w = clampf(wave, 0.0f, 1.0f) * 3.0f;  /* 0..3 */
+    if (w < 1.0f) {
+        out = sine * (1.0f - w) + tri * w;        /* sine → triangle */
+    } else if (w < 2.0f) {
+        float t = w - 1.0f;
+        out = tri * (1.0f - t) + saw * t;          /* triangle → sawtooth */
+    } else {
+        float t = w - 2.0f;
+        out = saw * (1.0f - t) + sqr * t;          /* sawtooth → square */
     }
+
     o->phase += freq / SAMPLE_RATE;
     if (o->phase >= 1.0f) o->phase -= 1.0f;
-    if (o->phase < 0.0f)  o->phase += 1.0f;
     return out;
 }
 
@@ -206,10 +214,10 @@ typedef struct {
     /* Parameters */
     float freq;             /* 20..20000 Hz */
     float attack;           /* 0.0001..1.0 sec */
-    float decay;            /* 0.0001..2.0 sec */
-    int   wave;             /* 0=sine, 1=saw, 2=square */
+    float decay;            /* 0.0001..4.0 sec */
+    float wave;             /* 0=sine, 0.33=tri, 0.66=saw, 1.0=square */
     float pitch_env_amt;    /* 0..1 (scales 0..1000 Hz) */
-    float pitch_env_rate;   /* 0.001..1.0 sec */
+    float pitch_env_rate;   /* 0.001..2.0 sec */
     float pitch_lfo_amt;    /* 0..1 */
     float pitch_lfo_rate;   /* 0.1..80 Hz */
     int   filter_type;      /* 0=LP, 1=HP, 2=BP */
@@ -221,190 +229,223 @@ typedef struct {
     float distortion;       /* 0..50 dB */
     float level;            /* 0..1 linear */
 
-    int   preset;           /* 0..7 (kick,snare,tom,clap,rimshot,hihat,cymbal,custom) */
+    int   preset;
     int   active;           /* voice is sounding */
     float velocity;         /* last note-on velocity */
+
+    /* Clap retrigger mechanism (808/909 style flutter) */
+    int   clap_count;       /* remaining retriggers (0=off, 1-4=flutter hits) */
+    int   clap_timer;       /* samples until next retrigger */
+    int   clap_spacing;     /* samples between retriggers (~10ms = 441 samples) */
 } wd_voice_t;
 
-/* ── 20 Preset shapes (0-18 = presets, 19 = Custom) ── */
-#define NUM_PRESETS 20
+/* ── 41 Preset shapes: 5×8 categories + Custom ── */
+#define NUM_PRESETS 41
+
+/* Helper: set common defaults, then preset overrides */
+static void preset_defaults(wd_voice_t *v) {
+    v->attack = 0.001f; v->pitch_lfo_amt = 0.0f; v->pitch_lfo_rate = 1.0f;
+    v->noise_attack = 0.001f; v->clap_count = 0; v->clap_spacing = 0;
+}
 
 static void voice_apply_preset(wd_voice_t *v, int preset) {
     v->preset = preset;
+    preset_defaults(v);
     switch (preset) {
-        case 0: /* Sub Kick — Pulsar-23 style sub-bass thump, long decay */
-            v->freq = 38.0f; v->wave = 0;
-            v->attack = 0.001f; v->decay = 0.7f;
-            v->pitch_env_amt = 0.95f; v->pitch_env_rate = 0.07f;
-            v->pitch_lfo_amt = 0.0f; v->pitch_lfo_rate = 1.0f;
-            v->filter_type = 0; v->filter_cutoff = 250.0f; v->filter_res = 1.2f;
-            v->noise_attack = 0.001f; v->noise_decay = 0.02f;
-            v->mix = 0.02f; v->distortion = 5.0f; v->level = 0.95f;
-            break;
-        case 1: /* Punch Kick — Syntakt-style tight and aggressive */
-            v->freq = 65.0f; v->wave = 0;
-            v->attack = 0.0003f; v->decay = 0.12f;
-            v->pitch_env_amt = 0.75f; v->pitch_env_rate = 0.02f;
-            v->pitch_lfo_amt = 0.0f; v->pitch_lfo_rate = 1.0f;
-            v->filter_type = 0; v->filter_cutoff = 600.0f; v->filter_res = 1.5f;
-            v->noise_attack = 0.0003f; v->noise_decay = 0.015f;
-            v->mix = 0.1f; v->distortion = 14.0f; v->level = 0.9f;
-            break;
-        case 2: /* FM Kick — Microtonic-style, saw pitch sweep into distortion */
-            v->freq = 48.0f; v->wave = 1;
-            v->attack = 0.0001f; v->decay = 0.35f;
-            v->pitch_env_amt = 1.0f; v->pitch_env_rate = 0.04f;
-            v->pitch_lfo_amt = 0.03f; v->pitch_lfo_rate = 8.0f;
-            v->filter_type = 0; v->filter_cutoff = 800.0f; v->filter_res = 2.0f;
-            v->noise_attack = 0.0001f; v->noise_decay = 0.04f;
-            v->mix = 0.08f; v->distortion = 20.0f; v->level = 0.85f;
-            break;
-        case 3: /* Snare — LXR-02 style, sharp noise + osc body */
-            v->freq = 190.0f; v->wave = 0;
-            v->attack = 0.0005f; v->decay = 0.14f;
-            v->pitch_env_amt = 0.35f; v->pitch_env_rate = 0.025f;
-            v->pitch_lfo_amt = 0.0f; v->pitch_lfo_rate = 1.0f;
-            v->filter_type = 2; v->filter_cutoff = 3500.0f; v->filter_res = 1.4f;
-            v->noise_attack = 0.0005f; v->noise_decay = 0.16f;
-            v->mix = 0.6f; v->distortion = 4.0f; v->level = 0.8f;
-            break;
-        case 4: /* Crack — Pulsar-23 style harsh transient, resonant noise */
-            v->freq = 350.0f; v->wave = 2;
-            v->attack = 0.0001f; v->decay = 0.06f;
-            v->pitch_env_amt = 0.5f; v->pitch_env_rate = 0.008f;
-            v->pitch_lfo_amt = 0.0f; v->pitch_lfo_rate = 1.0f;
-            v->filter_type = 2; v->filter_cutoff = 5000.0f; v->filter_res = 3.5f;
-            v->noise_attack = 0.0001f; v->noise_decay = 0.08f;
-            v->mix = 0.75f; v->distortion = 16.0f; v->level = 0.7f;
-            break;
-        case 5: /* Metallic — Microtonic FM bell, high resonance ring */
-            v->freq = 680.0f; v->wave = 2;
-            v->attack = 0.0001f; v->decay = 0.3f;
-            v->pitch_env_amt = 0.1f; v->pitch_env_rate = 0.006f;
-            v->pitch_lfo_amt = 0.08f; v->pitch_lfo_rate = 45.0f;
-            v->filter_type = 2; v->filter_cutoff = 2800.0f; v->filter_res = 4.0f;
-            v->noise_attack = 0.0001f; v->noise_decay = 0.05f;
-            v->mix = 0.2f; v->distortion = 12.0f; v->level = 0.6f;
-            break;
-        case 6: /* Low Tom — Syntakt analog tom, deep pitch sweep */
-            v->freq = 75.0f; v->wave = 0;
-            v->attack = 0.001f; v->decay = 0.4f;
-            v->pitch_env_amt = 0.55f; v->pitch_env_rate = 0.045f;
-            v->pitch_lfo_amt = 0.0f; v->pitch_lfo_rate = 1.0f;
-            v->filter_type = 0; v->filter_cutoff = 700.0f; v->filter_res = 1.0f;
-            v->noise_attack = 0.001f; v->noise_decay = 0.08f;
-            v->mix = 0.1f; v->distortion = 3.0f; v->level = 0.8f;
-            break;
-        case 7: /* Acid Tom — LXR-02 style, screaming filter sweep */
-            v->freq = 110.0f; v->wave = 1;
-            v->attack = 0.001f; v->decay = 0.3f;
-            v->pitch_env_amt = 0.7f; v->pitch_env_rate = 0.06f;
-            v->pitch_lfo_amt = 0.0f; v->pitch_lfo_rate = 1.0f;
-            v->filter_type = 0; v->filter_cutoff = 1800.0f; v->filter_res = 3.8f;
-            v->noise_attack = 0.001f; v->noise_decay = 0.05f;
-            v->mix = 0.05f; v->distortion = 10.0f; v->level = 0.75f;
-            break;
-        case 8: /* Conga — Pulsar-23 style, long resonant body */
-            v->freq = 240.0f; v->wave = 0;
-            v->attack = 0.0005f; v->decay = 0.45f;
-            v->pitch_env_amt = 0.25f; v->pitch_env_rate = 0.02f;
-            v->pitch_lfo_amt = 0.0f; v->pitch_lfo_rate = 1.0f;
-            v->filter_type = 2; v->filter_cutoff = 1200.0f; v->filter_res = 2.5f;
-            v->noise_attack = 0.0005f; v->noise_decay = 0.06f;
-            v->mix = 0.15f; v->distortion = 6.0f; v->level = 0.7f;
-            break;
-        case 9: /* Clap — Syntakt style, filtered noise burst */
-            v->freq = 900.0f; v->wave = 2;
-            v->attack = 0.001f; v->decay = 0.18f;
-            v->pitch_env_amt = 0.0f; v->pitch_env_rate = 0.01f;
-            v->pitch_lfo_amt = 0.0f; v->pitch_lfo_rate = 1.0f;
-            v->filter_type = 2; v->filter_cutoff = 1800.0f; v->filter_res = 1.8f;
-            v->noise_attack = 0.001f; v->noise_decay = 0.22f;
-            v->mix = 0.92f; v->distortion = 6.0f; v->level = 0.7f;
-            break;
-        case 10: /* Rimshot — sharp click, resonant body */
-            v->freq = 500.0f; v->wave = 2;
-            v->attack = 0.0001f; v->decay = 0.035f;
-            v->pitch_env_amt = 0.25f; v->pitch_env_rate = 0.008f;
-            v->pitch_lfo_amt = 0.0f; v->pitch_lfo_rate = 1.0f;
-            v->filter_type = 2; v->filter_cutoff = 4000.0f; v->filter_res = 2.5f;
-            v->noise_attack = 0.0001f; v->noise_decay = 0.03f;
-            v->mix = 0.4f; v->distortion = 8.0f; v->level = 0.75f;
-            break;
-        case 11: /* Closed HH — tight, LXR-02 metallic */
-            v->freq = 450.0f; v->wave = 2;
-            v->attack = 0.0001f; v->decay = 0.035f;
-            v->pitch_env_amt = 0.0f; v->pitch_env_rate = 0.01f;
-            v->pitch_lfo_amt = 0.04f; v->pitch_lfo_rate = 60.0f;
-            v->filter_type = 1; v->filter_cutoff = 9000.0f; v->filter_res = 2.0f;
-            v->noise_attack = 0.0001f; v->noise_decay = 0.035f;
-            v->mix = 0.92f; v->distortion = 3.0f; v->level = 0.55f;
-            break;
-        case 12: /* Open HH — sizzle with fast LFO shimmer */
-            v->freq = 420.0f; v->wave = 2;
-            v->attack = 0.0001f; v->decay = 0.3f;
-            v->pitch_env_amt = 0.0f; v->pitch_env_rate = 0.01f;
-            v->pitch_lfo_amt = 0.06f; v->pitch_lfo_rate = 40.0f;
-            v->filter_type = 1; v->filter_cutoff = 6500.0f; v->filter_res = 1.8f;
-            v->noise_attack = 0.0001f; v->noise_decay = 0.3f;
-            v->mix = 0.93f; v->distortion = 2.0f; v->level = 0.5f;
-            break;
-        case 13: /* Crash — long noisy wash */
-            v->freq = 280.0f; v->wave = 2;
-            v->attack = 0.002f; v->decay = 1.0f;
-            v->pitch_env_amt = 0.0f; v->pitch_env_rate = 0.01f;
-            v->pitch_lfo_amt = 0.07f; v->pitch_lfo_rate = 4.0f;
-            v->filter_type = 1; v->filter_cutoff = 4500.0f; v->filter_res = 1.2f;
-            v->noise_attack = 0.002f; v->noise_decay = 1.0f;
-            v->mix = 0.88f; v->distortion = 0.0f; v->level = 0.45f;
-            break;
-        case 14: /* Cowbell — Microtonic resonant square, bandpass ring */
-            v->freq = 560.0f; v->wave = 2;
-            v->attack = 0.0001f; v->decay = 0.12f;
-            v->pitch_env_amt = 0.06f; v->pitch_env_rate = 0.004f;
-            v->pitch_lfo_amt = 0.0f; v->pitch_lfo_rate = 1.0f;
-            v->filter_type = 2; v->filter_cutoff = 2200.0f; v->filter_res = 3.5f;
-            v->noise_attack = 0.0001f; v->noise_decay = 0.03f;
-            v->mix = 0.12f; v->distortion = 14.0f; v->level = 0.65f;
-            break;
-        case 15: /* Zap — Syntakt laser, extreme pitch sweep down */
-            v->freq = 1200.0f; v->wave = 1;
-            v->attack = 0.0001f; v->decay = 0.1f;
-            v->pitch_env_amt = 1.0f; v->pitch_env_rate = 0.1f;
-            v->pitch_lfo_amt = 0.0f; v->pitch_lfo_rate = 1.0f;
-            v->filter_type = 0; v->filter_cutoff = 8000.0f; v->filter_res = 2.5f;
-            v->noise_attack = 0.0001f; v->noise_decay = 0.01f;
-            v->mix = 0.03f; v->distortion = 18.0f; v->level = 0.7f;
-            break;
-        case 16: /* Glitch — Microtonic style, fast LFO + noise + distortion */
-            v->freq = 320.0f; v->wave = 2;
-            v->attack = 0.0001f; v->decay = 0.07f;
-            v->pitch_env_amt = 0.4f; v->pitch_env_rate = 0.015f;
-            v->pitch_lfo_amt = 0.3f; v->pitch_lfo_rate = 70.0f;
-            v->filter_type = 2; v->filter_cutoff = 3000.0f; v->filter_res = 3.0f;
-            v->noise_attack = 0.0001f; v->noise_decay = 0.07f;
-            v->mix = 0.5f; v->distortion = 22.0f; v->level = 0.6f;
-            break;
-        case 17: /* Drone Hit — Pulsar-23 style, long sustain with LFO throb */
-            v->freq = 60.0f; v->wave = 1;
-            v->attack = 0.01f; v->decay = 1.5f;
-            v->pitch_env_amt = 0.15f; v->pitch_env_rate = 0.1f;
-            v->pitch_lfo_amt = 0.12f; v->pitch_lfo_rate = 3.5f;
-            v->filter_type = 0; v->filter_cutoff = 1500.0f; v->filter_res = 3.0f;
-            v->noise_attack = 0.01f; v->noise_decay = 0.5f;
-            v->mix = 0.25f; v->distortion = 8.0f; v->level = 0.65f;
-            break;
-        case 18: /* Blip — Syntakt digital, short FM tonal ping */
-            v->freq = 1800.0f; v->wave = 0;
-            v->attack = 0.0001f; v->decay = 0.025f;
-            v->pitch_env_amt = 0.6f; v->pitch_env_rate = 0.008f;
-            v->pitch_lfo_amt = 0.0f; v->pitch_lfo_rate = 1.0f;
-            v->filter_type = 2; v->filter_cutoff = 5000.0f; v->filter_res = 3.5f;
-            v->noise_attack = 0.0001f; v->noise_decay = 0.01f;
-            v->mix = 0.05f; v->distortion = 10.0f; v->level = 0.6f;
-            break;
-        default: /* 19 = Custom — no change */
-            break;
+    /* ── KICKS (0-4) ── */
+    case 0: /* Sub Kick — deep 808 sub */
+        v->freq=38; v->wave=0.0f; v->decay=0.8f; v->pitch_env_amt=0.95f; v->pitch_env_rate=0.07f;
+        v->filter_type=0; v->filter_cutoff=250; v->filter_res=1.2f;
+        v->noise_decay=0.02f; v->mix=0.02f; v->distortion=5; v->level=0.95f; break;
+    case 1: /* Punch Kick — tight 909 */
+        v->freq=65; v->wave=0.0f; v->attack=0.0003f; v->decay=0.15f; v->pitch_env_amt=0.75f; v->pitch_env_rate=0.02f;
+        v->filter_type=0; v->filter_cutoff=600; v->filter_res=1.5f;
+        v->noise_decay=0.015f; v->mix=0.1f; v->distortion=14; v->level=0.9f; break;
+    case 2: /* FM Kick — saw sweep, Microtonic */
+        v->freq=48; v->wave=0.66f; v->attack=0.0001f; v->decay=0.35f; v->pitch_env_amt=1.0f; v->pitch_env_rate=0.04f;
+        v->pitch_lfo_amt=0.03f; v->pitch_lfo_rate=8;
+        v->filter_type=0; v->filter_cutoff=800; v->filter_res=2.0f;
+        v->noise_decay=0.04f; v->mix=0.08f; v->distortion=20; v->level=0.85f; break;
+    case 3: /* Dusty Kick — lo-fi saturated */
+        v->freq=50; v->wave=0.15f; v->decay=0.2f; v->pitch_env_amt=0.6f; v->pitch_env_rate=0.025f;
+        v->filter_type=0; v->filter_cutoff=500; v->filter_res=1.3f;
+        v->noise_decay=0.06f; v->mix=0.12f; v->distortion=25; v->level=0.85f; break;
+    case 4: /* Long Kick — boomy tail */
+        v->freq=42; v->wave=0.0f; v->decay=1.2f; v->pitch_env_amt=0.85f; v->pitch_env_rate=0.08f;
+        v->filter_type=0; v->filter_cutoff=350; v->filter_res=1.0f;
+        v->noise_decay=0.03f; v->mix=0.03f; v->distortion=3; v->level=0.9f; break;
+
+    /* ── SNARES (5-9) ── */
+    case 5: /* Snare — classic analog */
+        v->freq=190; v->wave=0.0f; v->attack=0.0005f; v->decay=0.16f; v->pitch_env_amt=0.35f; v->pitch_env_rate=0.025f;
+        v->filter_type=2; v->filter_cutoff=3500; v->filter_res=1.4f;
+        v->noise_decay=0.16f; v->mix=0.6f; v->distortion=4; v->level=0.8f; break;
+    case 6: /* Snap Snare — crispy 909 */
+        v->freq=220; v->wave=0.0f; v->attack=0.0003f; v->decay=0.1f; v->pitch_env_amt=0.4f; v->pitch_env_rate=0.015f;
+        v->filter_type=1; v->filter_cutoff=4000; v->filter_res=1.8f;
+        v->noise_attack=0.0003f; v->noise_decay=0.12f; v->mix=0.7f; v->distortion=6; v->level=0.75f; break;
+    case 7: /* Fat Snare — thick body */
+        v->freq=150; v->wave=0.15f; v->decay=0.25f; v->pitch_env_amt=0.2f; v->pitch_env_rate=0.04f;
+        v->filter_type=0; v->filter_cutoff=2000; v->filter_res=1.0f;
+        v->noise_decay=0.2f; v->mix=0.45f; v->distortion=5; v->level=0.85f; break;
+    case 8: /* Crack Snare — harsh transient */
+        v->freq=350; v->wave=1.0f; v->attack=0.0001f; v->decay=0.06f; v->pitch_env_amt=0.5f; v->pitch_env_rate=0.008f;
+        v->filter_type=2; v->filter_cutoff=5000; v->filter_res=3.5f;
+        v->noise_attack=0.0001f; v->noise_decay=0.08f; v->mix=0.75f; v->distortion=16; v->level=0.7f; break;
+    case 9: /* Noise Snare — pure noise */
+        v->freq=300; v->wave=1.0f; v->attack=0.0001f; v->decay=0.12f; v->pitch_env_amt=0.0f; v->pitch_env_rate=0.01f;
+        v->filter_type=2; v->filter_cutoff=4500; v->filter_res=1.2f;
+        v->noise_attack=0.0001f; v->noise_decay=0.15f; v->mix=0.95f; v->distortion=2; v->level=0.7f; break;
+
+    /* ── TOMS (10-14) ── */
+    case 10: /* Low Tom */
+        v->freq=75; v->wave=0.0f; v->decay=0.4f; v->pitch_env_amt=0.55f; v->pitch_env_rate=0.045f;
+        v->filter_type=0; v->filter_cutoff=700; v->filter_res=1.0f;
+        v->noise_decay=0.08f; v->mix=0.1f; v->distortion=3; v->level=0.8f; break;
+    case 11: /* Mid Tom */
+        v->freq=130; v->wave=0.0f; v->decay=0.3f; v->pitch_env_amt=0.45f; v->pitch_env_rate=0.035f;
+        v->filter_type=0; v->filter_cutoff=900; v->filter_res=1.0f;
+        v->noise_decay=0.06f; v->mix=0.08f; v->distortion=2; v->level=0.8f; break;
+    case 12: /* High Tom */
+        v->freq=200; v->wave=0.0f; v->decay=0.22f; v->pitch_env_amt=0.4f; v->pitch_env_rate=0.03f;
+        v->filter_type=0; v->filter_cutoff=1200; v->filter_res=1.0f;
+        v->noise_decay=0.05f; v->mix=0.08f; v->distortion=2; v->level=0.75f; break;
+    case 13: /* Acid Tom — resonant filter sweep */
+        v->freq=110; v->wave=0.66f; v->decay=0.35f; v->pitch_env_amt=0.7f; v->pitch_env_rate=0.06f;
+        v->filter_type=0; v->filter_cutoff=1800; v->filter_res=3.8f;
+        v->noise_decay=0.05f; v->mix=0.05f; v->distortion=10; v->level=0.75f; break;
+    case 14: /* Conga — long resonant body */
+        v->freq=240; v->wave=0.0f; v->attack=0.0005f; v->decay=0.5f; v->pitch_env_amt=0.25f; v->pitch_env_rate=0.02f;
+        v->filter_type=2; v->filter_cutoff=1200; v->filter_res=2.5f;
+        v->noise_attack=0.0005f; v->noise_decay=0.06f; v->mix=0.15f; v->distortion=6; v->level=0.7f; break;
+
+    /* ── HI-HATS (15-19) ── */
+    case 15: /* Closed HH — tight */
+        v->freq=450; v->wave=1.0f; v->attack=0.0001f; v->decay=0.035f; v->pitch_env_amt=0.0f; v->pitch_env_rate=0.01f;
+        v->pitch_lfo_amt=0.04f; v->pitch_lfo_rate=60;
+        v->filter_type=1; v->filter_cutoff=9000; v->filter_res=2.0f;
+        v->noise_attack=0.0001f; v->noise_decay=0.035f; v->mix=0.92f; v->distortion=3; v->level=0.55f; break;
+    case 16: /* Open HH — sizzle */
+        v->freq=420; v->wave=1.0f; v->attack=0.0001f; v->decay=0.35f; v->pitch_env_amt=0.0f; v->pitch_env_rate=0.01f;
+        v->pitch_lfo_amt=0.06f; v->pitch_lfo_rate=40;
+        v->filter_type=1; v->filter_cutoff=6500; v->filter_res=1.8f;
+        v->noise_attack=0.0001f; v->noise_decay=0.35f; v->mix=0.93f; v->distortion=2; v->level=0.5f; break;
+    case 17: /* Pedal HH — medium */
+        v->freq=380; v->wave=1.0f; v->attack=0.0001f; v->decay=0.1f; v->pitch_env_amt=0.0f; v->pitch_env_rate=0.01f;
+        v->pitch_lfo_amt=0.03f; v->pitch_lfo_rate=50;
+        v->filter_type=1; v->filter_cutoff=7000; v->filter_res=1.5f;
+        v->noise_attack=0.0001f; v->noise_decay=0.1f; v->mix=0.9f; v->distortion=1; v->level=0.5f; break;
+    case 18: /* Metallic HH — LXR-02 */
+        v->freq=500; v->wave=1.0f; v->attack=0.0001f; v->decay=0.05f; v->pitch_env_amt=0.05f; v->pitch_env_rate=0.005f;
+        v->pitch_lfo_amt=0.1f; v->pitch_lfo_rate=75;
+        v->filter_type=2; v->filter_cutoff=8000; v->filter_res=3.0f;
+        v->noise_attack=0.0001f; v->noise_decay=0.05f; v->mix=0.85f; v->distortion=8; v->level=0.55f; break;
+    case 19: /* Trashy HH — dirty, distorted */
+        v->freq=550; v->wave=0.8f; v->attack=0.0001f; v->decay=0.08f; v->pitch_env_amt=0.0f; v->pitch_env_rate=0.01f;
+        v->pitch_lfo_amt=0.15f; v->pitch_lfo_rate=65;
+        v->filter_type=1; v->filter_cutoff=5000; v->filter_res=2.5f;
+        v->noise_attack=0.0001f; v->noise_decay=0.08f; v->mix=0.88f; v->distortion=18; v->level=0.5f; break;
+
+    /* ── CYMBALS (20-24) ── */
+    case 20: /* Crash — bright */
+        v->freq=280; v->wave=1.0f; v->attack=0.002f; v->decay=1.2f; v->pitch_env_amt=0.0f; v->pitch_env_rate=0.01f;
+        v->pitch_lfo_amt=0.07f; v->pitch_lfo_rate=4;
+        v->filter_type=1; v->filter_cutoff=4500; v->filter_res=1.2f;
+        v->noise_attack=0.002f; v->noise_decay=1.2f; v->mix=0.88f; v->distortion=0; v->level=0.45f; break;
+    case 21: /* Ride — bell character */
+        v->freq=600; v->wave=1.0f; v->attack=0.0001f; v->decay=0.8f; v->pitch_env_amt=0.04f; v->pitch_env_rate=0.005f;
+        v->pitch_lfo_amt=0.03f; v->pitch_lfo_rate=6;
+        v->filter_type=2; v->filter_cutoff=5500; v->filter_res=2.0f;
+        v->noise_attack=0.0001f; v->noise_decay=0.6f; v->mix=0.7f; v->distortion=4; v->level=0.5f; break;
+    case 22: /* Ride Bell — ping */
+        v->freq=900; v->wave=1.0f; v->attack=0.0001f; v->decay=0.5f; v->pitch_env_amt=0.08f; v->pitch_env_rate=0.004f;
+        v->filter_type=2; v->filter_cutoff=4000; v->filter_res=3.5f;
+        v->noise_attack=0.0001f; v->noise_decay=0.2f; v->mix=0.4f; v->distortion=8; v->level=0.55f; break;
+    case 23: /* Dark Crash — filtered */
+        v->freq=250; v->wave=0.85f; v->attack=0.003f; v->decay=1.5f; v->pitch_env_amt=0.0f; v->pitch_env_rate=0.01f;
+        v->pitch_lfo_amt=0.05f; v->pitch_lfo_rate=3;
+        v->filter_type=0; v->filter_cutoff=3000; v->filter_res=1.0f;
+        v->noise_attack=0.003f; v->noise_decay=1.5f; v->mix=0.85f; v->distortion=0; v->level=0.45f; break;
+    case 24: /* Sizzle — long shimmer */
+        v->freq=350; v->wave=1.0f; v->attack=0.005f; v->decay=2.5f; v->pitch_env_amt=0.0f; v->pitch_env_rate=0.01f;
+        v->pitch_lfo_amt=0.1f; v->pitch_lfo_rate=5;
+        v->filter_type=1; v->filter_cutoff=6000; v->filter_res=1.5f;
+        v->noise_attack=0.005f; v->noise_decay=2.5f; v->mix=0.9f; v->distortion=0; v->level=0.4f; break;
+
+    /* ── CLAPS (25-29) — use clap retrigger for flutter ── */
+    case 25: /* Clap 808 — classic triple-hit flutter */
+        v->freq=800; v->wave=1.0f; v->attack=0.0001f; v->decay=0.2f; v->pitch_env_amt=0.0f; v->pitch_env_rate=0.01f;
+        v->filter_type=2; v->filter_cutoff=1800; v->filter_res=1.5f;
+        v->noise_attack=0.0001f; v->noise_decay=0.2f; v->mix=0.95f; v->distortion=4; v->level=0.7f;
+        v->clap_count=3; v->clap_spacing=480; break; /* 3 hits, ~11ms apart */
+    case 26: /* Tight Clap — fast flutter, short tail */
+        v->freq=1000; v->wave=1.0f; v->attack=0.0001f; v->decay=0.1f; v->pitch_env_amt=0.0f; v->pitch_env_rate=0.01f;
+        v->filter_type=2; v->filter_cutoff=2500; v->filter_res=1.8f;
+        v->noise_attack=0.0001f; v->noise_decay=0.1f; v->mix=0.92f; v->distortion=6; v->level=0.7f;
+        v->clap_count=2; v->clap_spacing=350; break;
+    case 27: /* Big Clap — wide flutter, long reverby tail */
+        v->freq=700; v->wave=1.0f; v->attack=0.0001f; v->decay=0.4f; v->pitch_env_amt=0.0f; v->pitch_env_rate=0.01f;
+        v->filter_type=2; v->filter_cutoff=1500; v->filter_res=1.2f;
+        v->noise_attack=0.0001f; v->noise_decay=0.4f; v->mix=0.93f; v->distortion=3; v->level=0.65f;
+        v->clap_count=4; v->clap_spacing=550; break; /* 4 hits, wider spacing */
+    case 28: /* Dirty Clap — distorted */
+        v->freq=900; v->wave=0.85f; v->attack=0.0001f; v->decay=0.15f; v->pitch_env_amt=0.0f; v->pitch_env_rate=0.01f;
+        v->filter_type=2; v->filter_cutoff=2000; v->filter_res=2.0f;
+        v->noise_attack=0.0001f; v->noise_decay=0.15f; v->mix=0.9f; v->distortion=18; v->level=0.65f;
+        v->clap_count=3; v->clap_spacing=400; break;
+    case 29: /* Snap Clap — single hit, no flutter */
+        v->freq=1200; v->wave=1.0f; v->attack=0.0001f; v->decay=0.08f; v->pitch_env_amt=0.1f; v->pitch_env_rate=0.005f;
+        v->filter_type=1; v->filter_cutoff=3000; v->filter_res=2.5f;
+        v->noise_attack=0.0001f; v->noise_decay=0.08f; v->mix=0.85f; v->distortion=8; v->level=0.7f; break;
+
+    /* ── PERCUSSION (30-34) ── */
+    case 30: /* Rimshot — sharp click */
+        v->freq=500; v->wave=1.0f; v->attack=0.0001f; v->decay=0.035f; v->pitch_env_amt=0.25f; v->pitch_env_rate=0.008f;
+        v->filter_type=2; v->filter_cutoff=4000; v->filter_res=2.5f;
+        v->noise_attack=0.0001f; v->noise_decay=0.03f; v->mix=0.4f; v->distortion=8; v->level=0.75f; break;
+    case 31: /* Cowbell — metallic ring */
+        v->freq=560; v->wave=1.0f; v->attack=0.0001f; v->decay=0.12f; v->pitch_env_amt=0.06f; v->pitch_env_rate=0.004f;
+        v->filter_type=2; v->filter_cutoff=2200; v->filter_res=3.5f;
+        v->noise_attack=0.0001f; v->noise_decay=0.03f; v->mix=0.12f; v->distortion=14; v->level=0.65f; break;
+    case 32: /* Clave — woody click */
+        v->freq=2500; v->wave=0.0f; v->attack=0.0001f; v->decay=0.02f; v->pitch_env_amt=0.15f; v->pitch_env_rate=0.005f;
+        v->filter_type=2; v->filter_cutoff=3000; v->filter_res=3.0f;
+        v->noise_attack=0.0001f; v->noise_decay=0.01f; v->mix=0.1f; v->distortion=8; v->level=0.7f; break;
+    case 33: /* Shaker — maracas */
+        v->freq=600; v->wave=1.0f; v->attack=0.002f; v->decay=0.12f; v->pitch_env_amt=0.0f; v->pitch_env_rate=0.01f;
+        v->filter_type=1; v->filter_cutoff=5000; v->filter_res=1.0f;
+        v->noise_attack=0.002f; v->noise_decay=0.12f; v->mix=0.85f; v->distortion=0; v->level=0.5f; break;
+    case 34: /* Tamb — tambourine */
+        v->freq=700; v->wave=1.0f; v->attack=0.0001f; v->decay=0.2f; v->pitch_env_amt=0.0f; v->pitch_env_rate=0.01f;
+        v->pitch_lfo_amt=0.08f; v->pitch_lfo_rate=50;
+        v->filter_type=1; v->filter_cutoff=7000; v->filter_res=2.0f;
+        v->noise_attack=0.0001f; v->noise_decay=0.2f; v->mix=0.9f; v->distortion=2; v->level=0.5f; break;
+
+    /* ── FX (35-39) ── */
+    case 35: /* Zap — laser sweep */
+        v->freq=1200; v->wave=0.66f; v->attack=0.0001f; v->decay=0.1f; v->pitch_env_amt=1.0f; v->pitch_env_rate=0.1f;
+        v->filter_type=0; v->filter_cutoff=8000; v->filter_res=2.5f;
+        v->noise_attack=0.0001f; v->noise_decay=0.01f; v->mix=0.03f; v->distortion=18; v->level=0.7f; break;
+    case 36: /* Glitch — fast LFO chaos */
+        v->freq=320; v->wave=1.0f; v->attack=0.0001f; v->decay=0.07f; v->pitch_env_amt=0.4f; v->pitch_env_rate=0.015f;
+        v->pitch_lfo_amt=0.3f; v->pitch_lfo_rate=70;
+        v->filter_type=2; v->filter_cutoff=3000; v->filter_res=3.0f;
+        v->noise_attack=0.0001f; v->noise_decay=0.07f; v->mix=0.5f; v->distortion=22; v->level=0.6f; break;
+    case 37: /* Drone Hit — long throb */
+        v->freq=60; v->wave=0.66f; v->attack=0.01f; v->decay=2.0f; v->pitch_env_amt=0.15f; v->pitch_env_rate=0.15f;
+        v->pitch_lfo_amt=0.12f; v->pitch_lfo_rate=3.5f;
+        v->filter_type=0; v->filter_cutoff=1500; v->filter_res=3.0f;
+        v->noise_attack=0.01f; v->noise_decay=0.5f; v->mix=0.25f; v->distortion=8; v->level=0.65f; break;
+    case 38: /* Blip — short tonal ping */
+        v->freq=1800; v->wave=0.0f; v->attack=0.0001f; v->decay=0.025f; v->pitch_env_amt=0.6f; v->pitch_env_rate=0.008f;
+        v->filter_type=2; v->filter_cutoff=5000; v->filter_res=3.5f;
+        v->noise_attack=0.0001f; v->noise_decay=0.01f; v->mix=0.05f; v->distortion=10; v->level=0.6f; break;
+    case 39: /* Noise Burst — white noise hit */
+        v->freq=200; v->wave=1.0f; v->attack=0.0001f; v->decay=0.06f; v->pitch_env_amt=0.0f; v->pitch_env_rate=0.01f;
+        v->filter_type=2; v->filter_cutoff=4000; v->filter_res=1.0f;
+        v->noise_attack=0.0001f; v->noise_decay=0.06f; v->mix=1.0f; v->distortion=2; v->level=0.6f; break;
+
+    default: /* 40 = Custom — no change */ break;
     }
 }
 
@@ -412,9 +453,8 @@ static void voice_init(wd_voice_t *v, int idx) {
     memset(v, 0, sizeof(*v));
     v->noise.state = 123456789u + (uint32_t)idx * 987654u;
     v->level = 0.8f;
-    /* Default: a useful drum kit across 8 voices */
-    int default_presets[] = { 0, 3, 6, 9, 10, 11, 12, 13 };
-    /* Deep Kick, Snare, Low Tom, Clap, Rimshot, Closed HH, Open HH, Cymbal */
+    /* Default kit: Kick, Snare, Low Tom, Clap 808, Rimshot, Closed HH, Open HH, Crash */
+    int default_presets[] = { 0, 5, 10, 25, 30, 15, 16, 20 };
     voice_apply_preset(v, default_presets[idx]);
 }
 
@@ -424,7 +464,6 @@ static void voice_trigger(wd_voice_t *v, float velocity) {
 
     /* Reset oscillator phase */
     osc_reset(&v->osc);
-    v->osc.waveform = v->wave;
 
     /* Configure envelopes */
     env_set_params(&v->amp_env, v->attack, v->decay, SAMPLE_RATE);
@@ -437,13 +476,29 @@ static void voice_trigger(wd_voice_t *v, float velocity) {
 
     /* Setup filter */
     v->filter.type = v->filter_type;
+
+    /* Clap retrigger: schedule flutter hits */
+    if (v->clap_count > 0) {
+        v->clap_timer = v->clap_spacing;
+    }
 }
 
 static float voice_render_sample(wd_voice_t *v) {
     if (!v->active) return 0.0f;
 
+    /* Clap retrigger: re-fire noise envelope at scheduled intervals */
+    if (v->clap_count > 0) {
+        if (--v->clap_timer <= 0) {
+            v->clap_count--;
+            v->clap_timer = v->clap_spacing;
+            /* Re-trigger noise envelope for the flutter hit */
+            env_set_params(&v->noise_env, 0.0001f, v->noise_decay, SAMPLE_RATE);
+            env_note_on(&v->noise_env);
+        }
+    }
+
     /* Check if voice is done */
-    if (!env_active(&v->amp_env) && !env_active(&v->noise_env)) {
+    if (!env_active(&v->amp_env) && !env_active(&v->noise_env) && v->clap_count <= 0) {
         v->active = 0;
         return 0.0f;
     }
@@ -470,7 +525,7 @@ static float voice_render_sample(wd_voice_t *v) {
     freq = clampf(freq, 20.0f, 20000.0f);
 
     /* Oscillator path: osc * amp_env * velocity * (1-mix) */
-    float osc_out = osc_next(&v->osc, freq);
+    float osc_out = osc_next(&v->osc, freq, v->wave);
     float amp = env_next(&v->amp_env) * v->velocity;
     float osc_signal = osc_out * amp * (1.0f - v->mix);
 
@@ -765,15 +820,16 @@ static const char *VOICE_KNOB_NAMES[8] = {
 };
 
 static const char *PRESET_NAMES[NUM_PRESETS] = {
-    "Sub Kick", "Punch Kick", "FM Kick",
-    "Snare", "Crack", "Metallic",
-    "Low Tom", "Acid Tom", "Conga",
-    "Clap", "Rimshot",
-    "Closed HH", "Open HH", "Crash",
-    "Cowbell", "Zap", "Glitch",
-    "Drone Hit", "Blip", "Custom"
+    /* Kicks 0-4 */     "Sub Kick", "Punch Kick", "FM Kick", "Dusty Kick", "Long Kick",
+    /* Snares 5-9 */    "Snare", "Snap Snare", "Fat Snare", "Crack Snare", "Noise Snare",
+    /* Toms 10-14 */    "Low Tom", "Mid Tom", "High Tom", "Acid Tom", "Conga",
+    /* HH 15-19 */      "Closed HH", "Open HH", "Pedal HH", "Metal HH", "Trash HH",
+    /* Cymbals 20-24 */ "Crash", "Ride", "Ride Bell", "Dark Crash", "Sizzle",
+    /* Claps 25-29 */   "Clap 808", "Tight Clap", "Big Clap", "Dirty Clap", "Snap Clap",
+    /* Perc 30-34 */    "Rimshot", "Cowbell", "Clave", "Shaker", "Tamb",
+    /* FX 35-39 */      "Zap", "Glitch", "Drone Hit", "Blip", "Noise Burst",
+    /* 40 */            "Custom"
 };
-static const char *WAVE_NAMES[3] = { "Sine", "Saw", "Square" };
 static const char *FILTER_NAMES[3] = { "LP", "HP", "BP" };
 
 /* ============================================================================
@@ -800,11 +856,11 @@ static float cutoff_to_knob(float f) {
     return logf(f / 20.0f) / logf(900.0f);
 }
 static float knob_to_decay(float k) {
-    /* 0.0001 .. 2.0 exponential */
-    return 0.0001f * powf(20000.0f, k);
+    /* 0.0001 .. 4.0 exponential */
+    return 0.0001f * powf(40000.0f, k);
 }
 static float decay_to_knob(float d) {
-    return logf(d / 0.0001f) / logf(20000.0f);
+    return logf(d / 0.0001f) / logf(40000.0f);
 }
 static float knob_to_eq_db(float k) {
     /* 0..1 -> -12..+12 dB */
@@ -942,9 +998,9 @@ static void set_param(void *instance, const char *key, const char *val) {
                     k = clampf(k + delta * 0.01f, 0.0f, 1.0f);
                     v->decay = knob_to_decay(k);
                 } break;
-                case 2: { /* Wave (enum) */
-                    v->wave = (v->wave + (delta > 0 ? 1 : -1) + 3) % 3;
-                } break;
+                case 2: /* Wave (continuous morph) */
+                    v->wave = clampf(v->wave + delta * 0.01f, 0.0f, 1.0f);
+                    break;
                 case 3: /* P.Env Amount */
                     v->pitch_env_amt = clampf(v->pitch_env_amt + delta * 0.01f, 0.0f, 1.0f);
                     break;
@@ -1000,14 +1056,15 @@ static void set_param(void *instance, const char *key, const char *val) {
         snprintf(k, sizeof(k), "v%d_freq", i+1);
         if (strcmp(key, k) == 0) { v->freq = clampf(f, 20.0f, 20000.0f); return; }
         snprintf(k, sizeof(k), "v%d_decay", i+1);
-        if (strcmp(key, k) == 0) { v->decay = clampf(f, 0.0001f, 2.0f); return; }
+        if (strcmp(key, k) == 0) { v->decay = clampf(f, 0.0001f, 4.0f); return; }
         snprintf(k, sizeof(k), "v%d_wave", i+1);
         if (strcmp(key, k) == 0) {
-            /* Accept string names or numeric */
-            if (strcmp(val, "Sine") == 0) v->wave = 0;
-            else if (strcmp(val, "Saw") == 0) v->wave = 1;
-            else if (strcmp(val, "Square") == 0) v->wave = 2;
-            else v->wave = (int)clampf(f, 0, 2);
+            /* Accept string names or float 0..1 */
+            if (strcmp(val, "Sine") == 0) v->wave = 0.0f;
+            else if (strcmp(val, "Triangle") == 0) v->wave = 0.33f;
+            else if (strcmp(val, "Saw") == 0) v->wave = 0.66f;
+            else if (strcmp(val, "Square") == 0) v->wave = 1.0f;
+            else v->wave = clampf(f, 0.0f, 1.0f);
             return;
         }
         snprintf(k, sizeof(k), "v%d_penv", i+1);
@@ -1045,7 +1102,7 @@ static void set_param(void *instance, const char *key, const char *val) {
         snprintf(k, sizeof(k), "v%d_fres", i+1);
         if (strcmp(key, k) == 0) { v->filter_res = clampf(f, 1.0f, 5.0f); return; }
         snprintf(k, sizeof(k), "v%d_prate", i+1);
-        if (strcmp(key, k) == 0) { v->pitch_env_rate = clampf(f, 0.001f, 1.0f); return; }
+        if (strcmp(key, k) == 0) { v->pitch_env_rate = clampf(f, 0.001f, 2.0f); return; }
         snprintf(k, sizeof(k), "v%d_lamt", i+1);
         if (strcmp(key, k) == 0) { v->pitch_lfo_amt = clampf(f, 0.0f, 1.0f); return; }
         snprintf(k, sizeof(k), "v%d_lrate", i+1);
@@ -1098,7 +1155,7 @@ static void set_param(void *instance, const char *key, const char *val) {
             NEXT_TOKEN(); v->freq = atof(token);
             NEXT_TOKEN(); v->attack = atof(token);
             NEXT_TOKEN(); v->decay = atof(token);
-            NEXT_TOKEN(); v->wave = atoi(token);
+            NEXT_TOKEN(); v->wave = atof(token);
             NEXT_TOKEN(); v->pitch_env_amt = atof(token);
             NEXT_TOKEN(); v->pitch_env_rate = atof(token);
             NEXT_TOKEN(); v->pitch_lfo_amt = atof(token);
@@ -1124,7 +1181,7 @@ static int get_param(void *instance, const char *key, char *buf, int buf_len) {
 
     /* Module name */
     if (strcmp(key, "name") == 0)
-        return snprintf(buf, buf_len, "WeirdDrum");
+        return snprintf(buf, buf_len, "WDrm");
 
     /* Knob names */
     if (strncmp(key, "knob_", 5) == 0 && strstr(key, "_name")) {
@@ -1171,7 +1228,16 @@ static int get_param(void *instance, const char *key, char *buf, int buf_len) {
         switch (knob) {
             case 0: return snprintf(buf, buf_len, "%dHz", (int)v->freq);
             case 1: return snprintf(buf, buf_len, "%dms", (int)(v->decay * 1000.0f));
-            case 2: return snprintf(buf, buf_len, "%s", WAVE_NAMES[v->wave]);
+            case 2: {
+                    float w = v->wave * 3.0f;
+                    if (w < 0.1f) return snprintf(buf, buf_len, "Sine");
+                    if (w < 1.0f) return snprintf(buf, buf_len, "Si>Tri %d%%", (int)(w * 100));
+                    if (w < 1.1f) return snprintf(buf, buf_len, "Tri");
+                    if (w < 2.0f) return snprintf(buf, buf_len, "Tr>Saw %d%%", (int)((w-1)*100));
+                    if (w < 2.1f) return snprintf(buf, buf_len, "Saw");
+                    if (w < 3.0f) return snprintf(buf, buf_len, "Sw>Sqr %d%%", (int)((w-2)*100));
+                    return snprintf(buf, buf_len, "Square");
+                }
             case 3: return snprintf(buf, buf_len, "%d%%", (int)(v->pitch_env_amt * 100.0f));
             case 4: return snprintf(buf, buf_len, "%d%%", (int)(v->mix * 100.0f));
             case 5: return snprintf(buf, buf_len, "%dHz", (int)v->filter_cutoff);
@@ -1205,71 +1271,71 @@ static int get_param(void *instance, const char *key, char *buf, int buf_len) {
             "{\"key\":\"q_hi\",\"name\":\"Hi Q\",\"type\":\"float\",\"min\":0.3,\"max\":8,\"step\":0.1},"
             "{\"key\":\"master\",\"name\":\"Master\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
             "{\"key\":\"v1_freq\",\"name\":\"V1 Freq\",\"type\":\"int\",\"min\":20,\"max\":20000,\"step\":1},"
-            "{\"key\":\"v1_decay\",\"name\":\"V1 Decay\",\"type\":\"float\",\"min\":0,\"max\":2,\"step\":0.01},"
-            "{\"key\":\"v1_wave\",\"name\":\"V1 Wave\",\"type\":\"enum\",\"options\":[\"Sine\",\"Saw\",\"Square\"]},"
+            "{\"key\":\"v1_decay\",\"name\":\"V1 Decay\",\"type\":\"float\",\"min\":0,\"max\":4,\"step\":0.01},"
+            "{\"key\":\"v1_wave\",\"name\":\"V1 Wave\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
             "{\"key\":\"v1_penv\",\"name\":\"V1 P.Env\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
             "{\"key\":\"v1_mix\",\"name\":\"V1 Mix\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
             "{\"key\":\"v1_cutoff\",\"name\":\"V1 Cutoff\",\"type\":\"int\",\"min\":20,\"max\":18000,\"step\":1},"
             "{\"key\":\"v1_dist\",\"name\":\"V1 Distort\",\"type\":\"float\",\"min\":0,\"max\":50,\"step\":0.5},"
-            "{\"key\":\"v1_preset\",\"name\":\"V1 Preset\",\"type\":\"int\",\"min\":0,\"max\":19,\"step\":1},"
+            "{\"key\":\"v1_preset\",\"name\":\"V1 Preset\",\"type\":\"int\",\"min\":0,\"max\":40,\"step\":1},"
             "{\"key\":\"v2_freq\",\"name\":\"V2 Freq\",\"type\":\"int\",\"min\":20,\"max\":20000,\"step\":1},"
-            "{\"key\":\"v2_decay\",\"name\":\"V2 Decay\",\"type\":\"float\",\"min\":0,\"max\":2,\"step\":0.01},"
-            "{\"key\":\"v2_wave\",\"name\":\"V2 Wave\",\"type\":\"enum\",\"options\":[\"Sine\",\"Saw\",\"Square\"]},"
+            "{\"key\":\"v2_decay\",\"name\":\"V2 Decay\",\"type\":\"float\",\"min\":0,\"max\":4,\"step\":0.01},"
+            "{\"key\":\"v2_wave\",\"name\":\"V2 Wave\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
             "{\"key\":\"v2_penv\",\"name\":\"V2 P.Env\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
             "{\"key\":\"v2_mix\",\"name\":\"V2 Mix\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
             "{\"key\":\"v2_cutoff\",\"name\":\"V2 Cutoff\",\"type\":\"int\",\"min\":20,\"max\":18000,\"step\":1},"
             "{\"key\":\"v2_dist\",\"name\":\"V2 Distort\",\"type\":\"float\",\"min\":0,\"max\":50,\"step\":0.5},"
-            "{\"key\":\"v2_preset\",\"name\":\"V2 Preset\",\"type\":\"int\",\"min\":0,\"max\":19,\"step\":1},"
+            "{\"key\":\"v2_preset\",\"name\":\"V2 Preset\",\"type\":\"int\",\"min\":0,\"max\":40,\"step\":1},"
             "{\"key\":\"v3_freq\",\"name\":\"V3 Freq\",\"type\":\"int\",\"min\":20,\"max\":20000,\"step\":1},"
-            "{\"key\":\"v3_decay\",\"name\":\"V3 Decay\",\"type\":\"float\",\"min\":0,\"max\":2,\"step\":0.01},"
-            "{\"key\":\"v3_wave\",\"name\":\"V3 Wave\",\"type\":\"enum\",\"options\":[\"Sine\",\"Saw\",\"Square\"]},"
+            "{\"key\":\"v3_decay\",\"name\":\"V3 Decay\",\"type\":\"float\",\"min\":0,\"max\":4,\"step\":0.01},"
+            "{\"key\":\"v3_wave\",\"name\":\"V3 Wave\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
             "{\"key\":\"v3_penv\",\"name\":\"V3 P.Env\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
             "{\"key\":\"v3_mix\",\"name\":\"V3 Mix\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
             "{\"key\":\"v3_cutoff\",\"name\":\"V3 Cutoff\",\"type\":\"int\",\"min\":20,\"max\":18000,\"step\":1},"
             "{\"key\":\"v3_dist\",\"name\":\"V3 Distort\",\"type\":\"float\",\"min\":0,\"max\":50,\"step\":0.5},"
-            "{\"key\":\"v3_preset\",\"name\":\"V3 Preset\",\"type\":\"int\",\"min\":0,\"max\":19,\"step\":1},"
+            "{\"key\":\"v3_preset\",\"name\":\"V3 Preset\",\"type\":\"int\",\"min\":0,\"max\":40,\"step\":1},"
             "{\"key\":\"v4_freq\",\"name\":\"V4 Freq\",\"type\":\"int\",\"min\":20,\"max\":20000,\"step\":1},"
-            "{\"key\":\"v4_decay\",\"name\":\"V4 Decay\",\"type\":\"float\",\"min\":0,\"max\":2,\"step\":0.01},"
-            "{\"key\":\"v4_wave\",\"name\":\"V4 Wave\",\"type\":\"enum\",\"options\":[\"Sine\",\"Saw\",\"Square\"]},"
+            "{\"key\":\"v4_decay\",\"name\":\"V4 Decay\",\"type\":\"float\",\"min\":0,\"max\":4,\"step\":0.01},"
+            "{\"key\":\"v4_wave\",\"name\":\"V4 Wave\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
             "{\"key\":\"v4_penv\",\"name\":\"V4 P.Env\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
             "{\"key\":\"v4_mix\",\"name\":\"V4 Mix\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
             "{\"key\":\"v4_cutoff\",\"name\":\"V4 Cutoff\",\"type\":\"int\",\"min\":20,\"max\":18000,\"step\":1},"
             "{\"key\":\"v4_dist\",\"name\":\"V4 Distort\",\"type\":\"float\",\"min\":0,\"max\":50,\"step\":0.5},"
-            "{\"key\":\"v4_preset\",\"name\":\"V4 Preset\",\"type\":\"int\",\"min\":0,\"max\":19,\"step\":1},"
+            "{\"key\":\"v4_preset\",\"name\":\"V4 Preset\",\"type\":\"int\",\"min\":0,\"max\":40,\"step\":1},"
             "{\"key\":\"v5_freq\",\"name\":\"V5 Freq\",\"type\":\"int\",\"min\":20,\"max\":20000,\"step\":1},"
-            "{\"key\":\"v5_decay\",\"name\":\"V5 Decay\",\"type\":\"float\",\"min\":0,\"max\":2,\"step\":0.01},"
-            "{\"key\":\"v5_wave\",\"name\":\"V5 Wave\",\"type\":\"enum\",\"options\":[\"Sine\",\"Saw\",\"Square\"]},"
+            "{\"key\":\"v5_decay\",\"name\":\"V5 Decay\",\"type\":\"float\",\"min\":0,\"max\":4,\"step\":0.01},"
+            "{\"key\":\"v5_wave\",\"name\":\"V5 Wave\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
             "{\"key\":\"v5_penv\",\"name\":\"V5 P.Env\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
             "{\"key\":\"v5_mix\",\"name\":\"V5 Mix\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
             "{\"key\":\"v5_cutoff\",\"name\":\"V5 Cutoff\",\"type\":\"int\",\"min\":20,\"max\":18000,\"step\":1},"
             "{\"key\":\"v5_dist\",\"name\":\"V5 Distort\",\"type\":\"float\",\"min\":0,\"max\":50,\"step\":0.5},"
-            "{\"key\":\"v5_preset\",\"name\":\"V5 Preset\",\"type\":\"int\",\"min\":0,\"max\":19,\"step\":1},"
+            "{\"key\":\"v5_preset\",\"name\":\"V5 Preset\",\"type\":\"int\",\"min\":0,\"max\":40,\"step\":1},"
             "{\"key\":\"v6_freq\",\"name\":\"V6 Freq\",\"type\":\"int\",\"min\":20,\"max\":20000,\"step\":1},"
-            "{\"key\":\"v6_decay\",\"name\":\"V6 Decay\",\"type\":\"float\",\"min\":0,\"max\":2,\"step\":0.01},"
-            "{\"key\":\"v6_wave\",\"name\":\"V6 Wave\",\"type\":\"enum\",\"options\":[\"Sine\",\"Saw\",\"Square\"]},"
+            "{\"key\":\"v6_decay\",\"name\":\"V6 Decay\",\"type\":\"float\",\"min\":0,\"max\":4,\"step\":0.01},"
+            "{\"key\":\"v6_wave\",\"name\":\"V6 Wave\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
             "{\"key\":\"v6_penv\",\"name\":\"V6 P.Env\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
             "{\"key\":\"v6_mix\",\"name\":\"V6 Mix\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
             "{\"key\":\"v6_cutoff\",\"name\":\"V6 Cutoff\",\"type\":\"int\",\"min\":20,\"max\":18000,\"step\":1},"
             "{\"key\":\"v6_dist\",\"name\":\"V6 Distort\",\"type\":\"float\",\"min\":0,\"max\":50,\"step\":0.5},"
-            "{\"key\":\"v6_preset\",\"name\":\"V6 Preset\",\"type\":\"int\",\"min\":0,\"max\":19,\"step\":1},"
+            "{\"key\":\"v6_preset\",\"name\":\"V6 Preset\",\"type\":\"int\",\"min\":0,\"max\":40,\"step\":1},"
             "{\"key\":\"v7_freq\",\"name\":\"V7 Freq\",\"type\":\"int\",\"min\":20,\"max\":20000,\"step\":1},"
-            "{\"key\":\"v7_decay\",\"name\":\"V7 Decay\",\"type\":\"float\",\"min\":0,\"max\":2,\"step\":0.01},"
-            "{\"key\":\"v7_wave\",\"name\":\"V7 Wave\",\"type\":\"enum\",\"options\":[\"Sine\",\"Saw\",\"Square\"]},"
+            "{\"key\":\"v7_decay\",\"name\":\"V7 Decay\",\"type\":\"float\",\"min\":0,\"max\":4,\"step\":0.01},"
+            "{\"key\":\"v7_wave\",\"name\":\"V7 Wave\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
             "{\"key\":\"v7_penv\",\"name\":\"V7 P.Env\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
             "{\"key\":\"v7_mix\",\"name\":\"V7 Mix\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
             "{\"key\":\"v7_cutoff\",\"name\":\"V7 Cutoff\",\"type\":\"int\",\"min\":20,\"max\":18000,\"step\":1},"
             "{\"key\":\"v7_dist\",\"name\":\"V7 Distort\",\"type\":\"float\",\"min\":0,\"max\":50,\"step\":0.5},"
-            "{\"key\":\"v7_preset\",\"name\":\"V7 Preset\",\"type\":\"int\",\"min\":0,\"max\":19,\"step\":1},"
+            "{\"key\":\"v7_preset\",\"name\":\"V7 Preset\",\"type\":\"int\",\"min\":0,\"max\":40,\"step\":1},"
             "{\"key\":\"v8_freq\",\"name\":\"V8 Freq\",\"type\":\"int\",\"min\":20,\"max\":20000,\"step\":1},"
-            "{\"key\":\"v8_decay\",\"name\":\"V8 Decay\",\"type\":\"float\",\"min\":0,\"max\":2,\"step\":0.01},"
-            "{\"key\":\"v8_wave\",\"name\":\"V8 Wave\",\"type\":\"enum\",\"options\":[\"Sine\",\"Saw\",\"Square\"]},"
+            "{\"key\":\"v8_decay\",\"name\":\"V8 Decay\",\"type\":\"float\",\"min\":0,\"max\":4,\"step\":0.01},"
+            "{\"key\":\"v8_wave\",\"name\":\"V8 Wave\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
             "{\"key\":\"v8_penv\",\"name\":\"V8 P.Env\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
             "{\"key\":\"v8_mix\",\"name\":\"V8 Mix\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
             "{\"key\":\"v8_cutoff\",\"name\":\"V8 Cutoff\",\"type\":\"int\",\"min\":20,\"max\":18000,\"step\":1},"
             "{\"key\":\"v8_dist\",\"name\":\"V8 Distort\",\"type\":\"float\",\"min\":0,\"max\":50,\"step\":0.5},"
-            "{\"key\":\"v8_preset\",\"name\":\"V8 Preset\",\"type\":\"int\",\"min\":0,\"max\":19,\"step\":1},"
+            "{\"key\":\"v8_preset\",\"name\":\"V8 Preset\",\"type\":\"int\",\"min\":0,\"max\":40,\"step\":1},"
             "{\"key\":\"v1_attack\",\"name\":\"V1 Attack\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.001},"
-            "{\"key\":\"v1_prate\",\"name\":\"V1 P.Rate\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
+            "{\"key\":\"v1_prate\",\"name\":\"V1 P.Rate\",\"type\":\"float\",\"min\":0,\"max\":2,\"step\":0.01},"
             "{\"key\":\"v1_lamt\",\"name\":\"V1 LFO Amt\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
             "{\"key\":\"v1_lrate\",\"name\":\"V1 LFO Rt\",\"type\":\"float\",\"min\":0.1,\"max\":80,\"step\":0.5},"
             "{\"key\":\"v1_ftype\",\"name\":\"V1 F.Type\",\"type\":\"enum\",\"options\":[\"LP\",\"HP\",\"BP\"]},"
@@ -1278,7 +1344,7 @@ static int get_param(void *instance, const char *key, char *buf, int buf_len) {
             "{\"key\":\"v1_ndecay\",\"name\":\"V1 N.Dec\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
             "{\"key\":\"v1_level\",\"name\":\"V1 Level\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
             "{\"key\":\"v2_attack\",\"name\":\"V2 Attack\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.001},"
-            "{\"key\":\"v2_prate\",\"name\":\"V2 P.Rate\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
+            "{\"key\":\"v2_prate\",\"name\":\"V2 P.Rate\",\"type\":\"float\",\"min\":0,\"max\":2,\"step\":0.01},"
             "{\"key\":\"v2_lamt\",\"name\":\"V2 LFO Amt\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
             "{\"key\":\"v2_lrate\",\"name\":\"V2 LFO Rt\",\"type\":\"float\",\"min\":0.1,\"max\":80,\"step\":0.5},"
             "{\"key\":\"v2_ftype\",\"name\":\"V2 F.Type\",\"type\":\"enum\",\"options\":[\"LP\",\"HP\",\"BP\"]},"
@@ -1287,7 +1353,7 @@ static int get_param(void *instance, const char *key, char *buf, int buf_len) {
             "{\"key\":\"v2_ndecay\",\"name\":\"V2 N.Dec\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
             "{\"key\":\"v2_level\",\"name\":\"V2 Level\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
             "{\"key\":\"v3_attack\",\"name\":\"V3 Attack\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.001},"
-            "{\"key\":\"v3_prate\",\"name\":\"V3 P.Rate\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
+            "{\"key\":\"v3_prate\",\"name\":\"V3 P.Rate\",\"type\":\"float\",\"min\":0,\"max\":2,\"step\":0.01},"
             "{\"key\":\"v3_lamt\",\"name\":\"V3 LFO Amt\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
             "{\"key\":\"v3_lrate\",\"name\":\"V3 LFO Rt\",\"type\":\"float\",\"min\":0.1,\"max\":80,\"step\":0.5},"
             "{\"key\":\"v3_ftype\",\"name\":\"V3 F.Type\",\"type\":\"enum\",\"options\":[\"LP\",\"HP\",\"BP\"]},"
@@ -1296,7 +1362,7 @@ static int get_param(void *instance, const char *key, char *buf, int buf_len) {
             "{\"key\":\"v3_ndecay\",\"name\":\"V3 N.Dec\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
             "{\"key\":\"v3_level\",\"name\":\"V3 Level\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
             "{\"key\":\"v4_attack\",\"name\":\"V4 Attack\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.001},"
-            "{\"key\":\"v4_prate\",\"name\":\"V4 P.Rate\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
+            "{\"key\":\"v4_prate\",\"name\":\"V4 P.Rate\",\"type\":\"float\",\"min\":0,\"max\":2,\"step\":0.01},"
             "{\"key\":\"v4_lamt\",\"name\":\"V4 LFO Amt\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
             "{\"key\":\"v4_lrate\",\"name\":\"V4 LFO Rt\",\"type\":\"float\",\"min\":0.1,\"max\":80,\"step\":0.5},"
             "{\"key\":\"v4_ftype\",\"name\":\"V4 F.Type\",\"type\":\"enum\",\"options\":[\"LP\",\"HP\",\"BP\"]},"
@@ -1305,7 +1371,7 @@ static int get_param(void *instance, const char *key, char *buf, int buf_len) {
             "{\"key\":\"v4_ndecay\",\"name\":\"V4 N.Dec\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
             "{\"key\":\"v4_level\",\"name\":\"V4 Level\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
             "{\"key\":\"v5_attack\",\"name\":\"V5 Attack\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.001},"
-            "{\"key\":\"v5_prate\",\"name\":\"V5 P.Rate\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
+            "{\"key\":\"v5_prate\",\"name\":\"V5 P.Rate\",\"type\":\"float\",\"min\":0,\"max\":2,\"step\":0.01},"
             "{\"key\":\"v5_lamt\",\"name\":\"V5 LFO Amt\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
             "{\"key\":\"v5_lrate\",\"name\":\"V5 LFO Rt\",\"type\":\"float\",\"min\":0.1,\"max\":80,\"step\":0.5},"
             "{\"key\":\"v5_ftype\",\"name\":\"V5 F.Type\",\"type\":\"enum\",\"options\":[\"LP\",\"HP\",\"BP\"]},"
@@ -1314,7 +1380,7 @@ static int get_param(void *instance, const char *key, char *buf, int buf_len) {
             "{\"key\":\"v5_ndecay\",\"name\":\"V5 N.Dec\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
             "{\"key\":\"v5_level\",\"name\":\"V5 Level\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
             "{\"key\":\"v6_attack\",\"name\":\"V6 Attack\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.001},"
-            "{\"key\":\"v6_prate\",\"name\":\"V6 P.Rate\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
+            "{\"key\":\"v6_prate\",\"name\":\"V6 P.Rate\",\"type\":\"float\",\"min\":0,\"max\":2,\"step\":0.01},"
             "{\"key\":\"v6_lamt\",\"name\":\"V6 LFO Amt\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
             "{\"key\":\"v6_lrate\",\"name\":\"V6 LFO Rt\",\"type\":\"float\",\"min\":0.1,\"max\":80,\"step\":0.5},"
             "{\"key\":\"v6_ftype\",\"name\":\"V6 F.Type\",\"type\":\"enum\",\"options\":[\"LP\",\"HP\",\"BP\"]},"
@@ -1323,7 +1389,7 @@ static int get_param(void *instance, const char *key, char *buf, int buf_len) {
             "{\"key\":\"v6_ndecay\",\"name\":\"V6 N.Dec\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
             "{\"key\":\"v6_level\",\"name\":\"V6 Level\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
             "{\"key\":\"v7_attack\",\"name\":\"V7 Attack\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.001},"
-            "{\"key\":\"v7_prate\",\"name\":\"V7 P.Rate\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
+            "{\"key\":\"v7_prate\",\"name\":\"V7 P.Rate\",\"type\":\"float\",\"min\":0,\"max\":2,\"step\":0.01},"
             "{\"key\":\"v7_lamt\",\"name\":\"V7 LFO Amt\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
             "{\"key\":\"v7_lrate\",\"name\":\"V7 LFO Rt\",\"type\":\"float\",\"min\":0.1,\"max\":80,\"step\":0.5},"
             "{\"key\":\"v7_ftype\",\"name\":\"V7 F.Type\",\"type\":\"enum\",\"options\":[\"LP\",\"HP\",\"BP\"]},"
@@ -1332,7 +1398,7 @@ static int get_param(void *instance, const char *key, char *buf, int buf_len) {
             "{\"key\":\"v7_ndecay\",\"name\":\"V7 N.Dec\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
             "{\"key\":\"v7_level\",\"name\":\"V7 Level\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
             "{\"key\":\"v8_attack\",\"name\":\"V8 Attack\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.001},"
-            "{\"key\":\"v8_prate\",\"name\":\"V8 P.Rate\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
+            "{\"key\":\"v8_prate\",\"name\":\"V8 P.Rate\",\"type\":\"float\",\"min\":0,\"max\":2,\"step\":0.01},"
             "{\"key\":\"v8_lamt\",\"name\":\"V8 LFO Amt\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
             "{\"key\":\"v8_lrate\",\"name\":\"V8 LFO Rt\",\"type\":\"float\",\"min\":0.1,\"max\":80,\"step\":0.5},"
             "{\"key\":\"v8_ftype\",\"name\":\"V8 F.Type\",\"type\":\"enum\",\"options\":[\"LP\",\"HP\",\"BP\"]},"
@@ -1412,7 +1478,7 @@ static int get_param(void *instance, const char *key, char *buf, int buf_len) {
         for (int i = 0; i < NUM_VOICES; i++) {
             wd_voice_t *v = &inst->voice[i];
             n += snprintf(buf + n, buf_len - n,
-                "%d %.1f %.4f %.4f %d %.3f %.4f %.3f %.1f %d %.0f %.2f %.4f %.4f %.3f %.1f %.3f ",
+                "%d %.1f %.4f %.4f %.4f %.3f %.4f %.3f %.1f %d %.0f %.2f %.4f %.4f %.3f %.1f %.3f ",
                 v->preset, v->freq, v->attack, v->decay, v->wave,
                 v->pitch_env_amt, v->pitch_env_rate, v->pitch_lfo_amt, v->pitch_lfo_rate,
                 v->filter_type, v->filter_cutoff, v->filter_res,
@@ -1455,7 +1521,7 @@ static int get_param(void *instance, const char *key, char *buf, int buf_len) {
         snprintf(k, sizeof(k), "v%d_decay", i+1);
         if (strcmp(key, k) == 0) return snprintf(buf, buf_len, "%.4f", v->decay);
         snprintf(k, sizeof(k), "v%d_wave", i+1);
-        if (strcmp(key, k) == 0) return snprintf(buf, buf_len, "%s", WAVE_NAMES[v->wave]);
+        if (strcmp(key, k) == 0) return snprintf(buf, buf_len, "%.4f", v->wave);
         snprintf(k, sizeof(k), "v%d_penv", i+1);
         if (strcmp(key, k) == 0) return snprintf(buf, buf_len, "%.4f", v->pitch_env_amt);
         snprintf(k, sizeof(k), "v%d_mix", i+1);
