@@ -1,0 +1,1039 @@
+/* ============================================================================
+ * Weird Drum Machine — 8-voice analog drum synthesizer for Ableton Move
+ * Port of dfilaretti/WeirdDrums (MIT) to Move Everything framework
+ *
+ * Architecture: 8 independent drum voices, each with:
+ *   - Phase-accumulator oscillator (sine/saw/square)
+ *   - Exponential AD envelope (amp)
+ *   - Pitch envelope + pitch LFO
+ *   - White noise generator with SVF filter (LP/HP/BP)
+ *   - Noise AD envelope
+ *   - tanh distortion
+ *   - Per-voice level
+ *
+ * Master bus: compressor, distortion, 3-band EQ
+ * UI: Mixer page, General page, 8 voice pages
+ * ============================================================================ */
+
+#include <math.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <stdint.h>
+#include <string.h>
+
+#define SAMPLE_RATE     44100.0f
+#define BLOCK_SIZE      128
+#define NUM_VOICES      8
+#define TWO_PI          6.283185307f
+#define ENV_MIN         0.0001f
+
+/* ── Clamp ── */
+static inline float clampf(float x, float lo, float hi) {
+    if (x < lo) return lo;
+    if (x > hi) return hi;
+    return x;
+}
+
+/* ── One-pole smoother ── */
+static inline float onepole(float *state, float target, float coeff) {
+    *state += coeff * (target - *state);
+    return *state;
+}
+
+/* ============================================================================
+ * DSP Primitives
+ * ============================================================================ */
+
+/* ── Exponential AD Envelope ── */
+typedef struct {
+    enum { ENV_IDLE, ENV_ATTACK, ENV_DECAY, ENV_TAILOFF } state;
+    float value;
+    float attack_mult;
+    float decay_mult;
+    int   attack_len;
+    int   decay_len;
+    int   sample_idx;
+    float tailoff;
+} wd_envelope_t;
+
+static void env_set_params(wd_envelope_t *e, float attack_sec, float decay_sec, float sr) {
+    e->attack_len = (int)(attack_sec * sr);
+    e->decay_len  = (int)(decay_sec * sr);
+    if (e->attack_len < 1) e->attack_len = 1;
+    if (e->decay_len < 1)  e->decay_len = 1;
+    e->attack_mult = 1.0f + (logf(1.0f) - logf(ENV_MIN)) / (float)e->attack_len;
+    e->decay_mult  = 1.0f + (logf(ENV_MIN) - logf(1.0f)) / (float)e->decay_len;
+}
+
+static void env_reset(wd_envelope_t *e) {
+    e->state = ENV_IDLE;
+    e->value = ENV_MIN;
+    e->sample_idx = 0;
+    e->tailoff = 0.0f;
+}
+
+static void env_note_on(wd_envelope_t *e) {
+    e->value = ENV_MIN;
+    e->sample_idx = 0;
+    e->state = ENV_ATTACK;
+}
+
+static void env_note_off(wd_envelope_t *e) {
+    if (e->state != ENV_IDLE) {
+        e->tailoff = 1.0f;
+        e->state = ENV_TAILOFF;
+    }
+}
+
+static float env_next(wd_envelope_t *e) {
+    if (e->state == ENV_IDLE) return 0.0f;
+
+    if (e->state == ENV_ATTACK) {
+        e->value *= e->attack_mult;
+        e->sample_idx++;
+        if (e->sample_idx >= e->attack_len) {
+            e->value = 1.0f;
+            e->sample_idx = 0;
+            e->state = ENV_DECAY;
+        }
+    } else if (e->state == ENV_DECAY) {
+        e->value *= e->decay_mult;
+        e->sample_idx++;
+        if (e->sample_idx >= e->decay_len) {
+            env_reset(e);
+        }
+    } else if (e->state == ENV_TAILOFF) {
+        e->value *= e->tailoff;
+        e->tailoff *= 0.99f;
+        if (e->tailoff <= 0.005f) env_reset(e);
+    }
+
+    return e->value;
+}
+
+static int env_active(const wd_envelope_t *e) {
+    return e->state != ENV_IDLE;
+}
+
+/* ── Phase Accumulator Oscillator ── */
+typedef struct {
+    float phase;      /* 0..1 */
+    int   waveform;   /* 0=sine, 1=saw, 2=square */
+} wd_osc_t;
+
+static void osc_reset(wd_osc_t *o) { o->phase = 0.0f; }
+
+static float osc_next(wd_osc_t *o, float freq) {
+    float out;
+    float p = o->phase * TWO_PI;
+    switch (o->waveform) {
+        case 1:  /* saw: linear ramp -1..+1 */
+            out = 2.0f * o->phase - 1.0f;
+            break;
+        case 2:  /* square: sign of sine */
+            out = sinf(p) >= 0.0f ? 1.0f : -1.0f;
+            break;
+        default: /* sine */
+            out = sinf(p);
+            break;
+    }
+    o->phase += freq / SAMPLE_RATE;
+    if (o->phase >= 1.0f) o->phase -= 1.0f;
+    if (o->phase < 0.0f)  o->phase += 1.0f;
+    return out;
+}
+
+/* ── White Noise (xorshift32) ── */
+typedef struct { uint32_t state; } wd_noise_t;
+
+static float noise_next(wd_noise_t *n) {
+    uint32_t x = n->state;
+    x ^= x << 13;
+    x ^= x >> 17;
+    x ^= x << 5;
+    n->state = x;
+    return ((float)(x & 0xFFFF) / 32768.0f) - 1.0f;
+}
+
+/* ── State Variable Filter (LP/HP/BP) ── */
+typedef struct {
+    float lp, bp, hp;
+    int   type; /* 0=LP, 1=HP, 2=BP */
+} wd_svf_t;
+
+static void svf_reset(wd_svf_t *f) { f->lp = f->bp = f->hp = 0.0f; }
+
+static float svf_process(wd_svf_t *f, float in, float cutoff, float res) {
+    float fc = 2.0f * sinf(3.14159265f * cutoff / SAMPLE_RATE);
+    fc = clampf(fc, 0.0f, 1.0f);
+    float q = 1.0f / clampf(res, 0.5f, 20.0f);
+    f->lp += fc * f->bp;
+    f->hp  = in - f->lp - q * f->bp;
+    f->bp += fc * f->hp;
+    switch (f->type) {
+        case 1:  return f->hp;
+        case 2:  return f->bp;
+        default: return f->lp;
+    }
+}
+
+/* ── Pitch LFO (sine) ── */
+typedef struct {
+    float phase;
+} wd_lfo_t;
+
+static float lfo_next(wd_lfo_t *l, float rate) {
+    float out = sinf(l->phase * TWO_PI);
+    l->phase += rate / SAMPLE_RATE;
+    if (l->phase >= 1.0f) l->phase -= 1.0f;
+    return out;
+}
+
+/* ============================================================================
+ * Drum Voice
+ * ============================================================================ */
+
+typedef struct {
+    /* DSP modules */
+    wd_osc_t      osc;
+    wd_envelope_t amp_env;
+    wd_envelope_t noise_env;
+    wd_envelope_t pitch_env;
+    wd_noise_t    noise;
+    wd_svf_t      filter;
+    wd_lfo_t      lfo;
+
+    /* Parameters */
+    float freq;             /* 20..20000 Hz */
+    float attack;           /* 0.0001..1.0 sec */
+    float decay;            /* 0.0001..2.0 sec */
+    int   wave;             /* 0=sine, 1=saw, 2=square */
+    float pitch_env_amt;    /* 0..1 (scales 0..1000 Hz) */
+    float pitch_env_rate;   /* 0.001..1.0 sec */
+    float pitch_lfo_amt;    /* 0..1 */
+    float pitch_lfo_rate;   /* 0.1..80 Hz */
+    int   filter_type;      /* 0=LP, 1=HP, 2=BP */
+    float filter_cutoff;    /* 20..18000 Hz */
+    float filter_res;       /* 1..5 */
+    float noise_attack;     /* 0.0001..1.0 sec */
+    float noise_decay;      /* 0.0001..1.0 sec */
+    float mix;              /* 0..1 (0=osc, 1=noise) */
+    float distortion;       /* 0..50 dB */
+    float level;            /* 0..1 linear */
+
+    int   preset;           /* 0..7 (kick,snare,tom,clap,rimshot,hihat,cymbal,custom) */
+    int   active;           /* voice is sounding */
+    float velocity;         /* last note-on velocity */
+} wd_voice_t;
+
+/* ── Preset shapes ── */
+static void voice_apply_preset(wd_voice_t *v, int preset) {
+    v->preset = preset;
+    switch (preset) {
+        case 0: /* Kick */
+            v->freq = 55.0f; v->wave = 0;
+            v->attack = 0.001f; v->decay = 0.4f;
+            v->pitch_env_amt = 0.8f; v->pitch_env_rate = 0.05f;
+            v->pitch_lfo_amt = 0.0f; v->pitch_lfo_rate = 1.0f;
+            v->filter_type = 0; v->filter_cutoff = 400.0f; v->filter_res = 1.0f;
+            v->noise_attack = 0.001f; v->noise_decay = 0.05f;
+            v->mix = 0.05f; v->distortion = 6.0f; v->level = 0.9f;
+            break;
+        case 1: /* Snare */
+            v->freq = 180.0f; v->wave = 0;
+            v->attack = 0.001f; v->decay = 0.15f;
+            v->pitch_env_amt = 0.3f; v->pitch_env_rate = 0.03f;
+            v->pitch_lfo_amt = 0.0f; v->pitch_lfo_rate = 1.0f;
+            v->filter_type = 2; v->filter_cutoff = 3000.0f; v->filter_res = 1.2f;
+            v->noise_attack = 0.001f; v->noise_decay = 0.15f;
+            v->mix = 0.6f; v->distortion = 3.0f; v->level = 0.8f;
+            break;
+        case 2: /* Tom */
+            v->freq = 100.0f; v->wave = 0;
+            v->attack = 0.001f; v->decay = 0.3f;
+            v->pitch_env_amt = 0.5f; v->pitch_env_rate = 0.04f;
+            v->pitch_lfo_amt = 0.0f; v->pitch_lfo_rate = 1.0f;
+            v->filter_type = 0; v->filter_cutoff = 800.0f; v->filter_res = 1.0f;
+            v->noise_attack = 0.001f; v->noise_decay = 0.1f;
+            v->mix = 0.15f; v->distortion = 2.0f; v->level = 0.8f;
+            break;
+        case 3: /* Clap */
+            v->freq = 800.0f; v->wave = 2;
+            v->attack = 0.001f; v->decay = 0.2f;
+            v->pitch_env_amt = 0.0f; v->pitch_env_rate = 0.01f;
+            v->pitch_lfo_amt = 0.0f; v->pitch_lfo_rate = 1.0f;
+            v->filter_type = 2; v->filter_cutoff = 1500.0f; v->filter_res = 1.5f;
+            v->noise_attack = 0.001f; v->noise_decay = 0.2f;
+            v->mix = 0.9f; v->distortion = 4.0f; v->level = 0.7f;
+            break;
+        case 4: /* Rimshot */
+            v->freq = 500.0f; v->wave = 2;
+            v->attack = 0.0001f; v->decay = 0.04f;
+            v->pitch_env_amt = 0.2f; v->pitch_env_rate = 0.01f;
+            v->pitch_lfo_amt = 0.0f; v->pitch_lfo_rate = 1.0f;
+            v->filter_type = 2; v->filter_cutoff = 3500.0f; v->filter_res = 2.0f;
+            v->noise_attack = 0.0001f; v->noise_decay = 0.04f;
+            v->mix = 0.4f; v->distortion = 5.0f; v->level = 0.8f;
+            break;
+        case 5: /* Hi Hat */
+            v->freq = 400.0f; v->wave = 2;
+            v->attack = 0.0001f; v->decay = 0.08f;
+            v->pitch_env_amt = 0.0f; v->pitch_env_rate = 0.01f;
+            v->pitch_lfo_amt = 0.0f; v->pitch_lfo_rate = 1.0f;
+            v->filter_type = 1; v->filter_cutoff = 7000.0f; v->filter_res = 1.5f;
+            v->noise_attack = 0.0001f; v->noise_decay = 0.08f;
+            v->mix = 0.95f; v->distortion = 0.0f; v->level = 0.6f;
+            break;
+        case 6: /* Cymbal */
+            v->freq = 300.0f; v->wave = 2;
+            v->attack = 0.001f; v->decay = 0.8f;
+            v->pitch_env_amt = 0.0f; v->pitch_env_rate = 0.01f;
+            v->pitch_lfo_amt = 0.05f; v->pitch_lfo_rate = 3.0f;
+            v->filter_type = 1; v->filter_cutoff = 5000.0f; v->filter_res = 1.3f;
+            v->noise_attack = 0.001f; v->noise_decay = 0.8f;
+            v->mix = 0.9f; v->distortion = 0.0f; v->level = 0.5f;
+            break;
+        default: /* Custom — no change */
+            break;
+    }
+}
+
+static void voice_init(wd_voice_t *v, int idx) {
+    memset(v, 0, sizeof(*v));
+    v->noise.state = 123456789u + (uint32_t)idx * 987654u;
+    v->level = 0.8f;
+    /* Default each voice to a different preset */
+    int default_presets[] = { 0, 1, 2, 3, 4, 5, 6, 2 }; /* kick,snare,tom,clap,rim,hh,cym,tom */
+    voice_apply_preset(v, default_presets[idx]);
+}
+
+static void voice_trigger(wd_voice_t *v, float velocity) {
+    v->velocity = velocity;
+    v->active = 1;
+
+    /* Reset oscillator phase */
+    osc_reset(&v->osc);
+    v->osc.waveform = v->wave;
+
+    /* Configure envelopes */
+    env_set_params(&v->amp_env, v->attack, v->decay, SAMPLE_RATE);
+    env_set_params(&v->noise_env, v->noise_attack, v->noise_decay, SAMPLE_RATE);
+    env_set_params(&v->pitch_env, 0.001f, v->pitch_env_rate, SAMPLE_RATE);
+
+    env_note_on(&v->amp_env);
+    env_note_on(&v->noise_env);
+    env_note_on(&v->pitch_env);
+
+    /* Setup filter */
+    v->filter.type = v->filter_type;
+}
+
+static float voice_render_sample(wd_voice_t *v) {
+    if (!v->active) return 0.0f;
+
+    /* Check if voice is done */
+    if (!env_active(&v->amp_env) && !env_active(&v->noise_env)) {
+        v->active = 0;
+        return 0.0f;
+    }
+
+    /* Pitch modulation: LFO + pitch envelope */
+    float freq = v->freq;
+
+    /* Pitch LFO: freq * 2^(lfo * amount) */
+    if (v->pitch_lfo_amt > 0.001f) {
+        float lfo_val = lfo_next(&v->lfo, v->pitch_lfo_rate);
+        freq *= powf(2.0f, lfo_val * v->pitch_lfo_amt);
+    }
+
+    /* Pitch envelope: sweep from freq to freq + 1000*amount */
+    if (v->pitch_env_amt > 0.001f) {
+        float pe = env_next(&v->pitch_env);
+        float fmax = clampf(freq + 1000.0f * v->pitch_env_amt, 0.0f, 20000.0f);
+        freq = freq + pe * (fmax - freq);
+    } else {
+        /* Still need to advance pitch env */
+        env_next(&v->pitch_env);
+    }
+
+    freq = clampf(freq, 20.0f, 20000.0f);
+
+    /* Oscillator path: osc * amp_env * velocity * (1-mix) */
+    float osc_out = osc_next(&v->osc, freq);
+    float amp = env_next(&v->amp_env) * v->velocity;
+    float osc_signal = osc_out * amp * (1.0f - v->mix);
+
+    /* Noise path: noise -> SVF -> noise_env * velocity * mix */
+    float n = noise_next(&v->noise);
+    float filtered = svf_process(&v->filter, n, v->filter_cutoff, v->filter_res);
+    float noise_amp = env_next(&v->noise_env) * v->velocity;
+    float noise_signal = filtered * noise_amp * v->mix;
+
+    /* Mix */
+    float out = osc_signal + noise_signal;
+
+    /* Distortion: pregain -> tanh */
+    if (v->distortion > 0.1f) {
+        float pregain = powf(10.0f, v->distortion / 20.0f);
+        out = tanhf(out * pregain);
+    }
+
+    return out * v->level;
+}
+
+/* ============================================================================
+ * Master Bus FX
+ * ============================================================================ */
+
+typedef struct {
+    /* Compressor (simple RMS) */
+    float comp_amount;      /* 0..1 */
+    float comp_env;         /* RMS follower state */
+
+    /* Distortion */
+    float dist_amount;      /* 0..50 dB */
+
+    /* 3-band EQ */
+    float eq_low_gain;      /* -12..+12 dB -> linear */
+    float eq_mid_gain;      /* -12..+12 dB -> linear */
+    float eq_high_gain;     /* -12..+12 dB -> linear */
+    float eq_low_freq;      /* 20..500 Hz (sweepable) */
+    float eq_mid_freq;      /* 200..8000 Hz (sweepable) */
+    float eq_high_freq;     /* 2000..18000 Hz (sweepable) - currently unused, fixed crossover */
+
+    /* EQ filter states (Linkwitz-Riley 2nd order approximation via biquad) */
+    float eq_lp1, eq_lp2;   /* low shelf state */
+    float eq_hp1, eq_hp2;   /* high shelf state */
+    float eq_bp1, eq_bp2;   /* mid band state */
+
+    /* Master level */
+    float master_level;     /* 0..1 */
+} wd_master_t;
+
+static void master_init(wd_master_t *m) {
+    memset(m, 0, sizeof(*m));
+    m->comp_amount = 0.0f;
+    m->dist_amount = 0.0f;
+    m->eq_low_gain = 0.0f;
+    m->eq_mid_gain = 0.0f;
+    m->eq_high_gain = 0.0f;
+    m->eq_low_freq = 200.0f;
+    m->eq_mid_freq = 1000.0f;
+    m->eq_high_freq = 5000.0f;
+    m->master_level = 0.8f;
+}
+
+static float master_process(wd_master_t *m, float in) {
+    float out = in;
+
+    /* ── Compressor (simple envelope follower + gain reduction) ── */
+    if (m->comp_amount > 0.01f) {
+        float abs_in = fabsf(out);
+        /* Envelope follower with fast attack, slow release */
+        float attack_coeff = 0.01f;
+        float release_coeff = 0.0001f;
+        if (abs_in > m->comp_env)
+            m->comp_env += attack_coeff * (abs_in - m->comp_env);
+        else
+            m->comp_env += release_coeff * (abs_in - m->comp_env);
+
+        /* Gain reduction: threshold at 0.5, ratio controlled by comp_amount */
+        float threshold = 0.5f;
+        if (m->comp_env > threshold) {
+            float ratio = 1.0f + m->comp_amount * 9.0f; /* 1:1 to 10:1 */
+            float over = m->comp_env - threshold;
+            float target_over = over / ratio;
+            float gain = (threshold + target_over) / (threshold + over);
+            out *= gain;
+        }
+
+        /* Makeup gain: compensate for compression */
+        out *= 1.0f + m->comp_amount * 0.5f;
+    }
+
+    /* ── Master Distortion ── */
+    if (m->dist_amount > 0.1f) {
+        float pregain = powf(10.0f, m->dist_amount / 20.0f);
+        out = tanhf(out * pregain);
+    }
+
+    /* ── 3-Band EQ (simple 1-pole crossover) ── */
+    {
+        float fc_low = 2.0f * sinf(3.14159265f * m->eq_low_freq / SAMPLE_RATE);
+        float fc_high = 2.0f * sinf(3.14159265f * m->eq_high_freq / SAMPLE_RATE);
+        fc_low = clampf(fc_low, 0.0001f, 0.9f);
+        fc_high = clampf(fc_high, 0.0001f, 0.9f);
+
+        /* Low band: 1-pole LP */
+        m->eq_lp1 += fc_low * (out - m->eq_lp1);
+        float low = m->eq_lp1;
+
+        /* High band: 1-pole HP */
+        m->eq_hp1 += fc_high * (out - m->eq_hp1);
+        float high = out - m->eq_hp1;
+
+        /* Mid band: what's left */
+        float mid = out - low - high;
+
+        /* Apply gains (dB to linear) */
+        float lg = powf(10.0f, m->eq_low_gain / 20.0f);
+        float mg = powf(10.0f, m->eq_mid_gain / 20.0f);
+        float hg = powf(10.0f, m->eq_high_gain / 20.0f);
+
+        out = low * lg + mid * mg + high * hg;
+    }
+
+    /* ── Master Level ── */
+    out *= m->master_level;
+
+    return out;
+}
+
+/* ============================================================================
+ * Instance
+ * ============================================================================ */
+
+typedef struct {
+    wd_voice_t  voice[NUM_VOICES];
+    wd_master_t master;
+    float       voice_vol[NUM_VOICES];   /* mixer page volumes */
+    float       voice_vol_smooth[NUM_VOICES];
+    int         current_page;            /* 0=mixer, 1=general, 2..9=voice1..8 */
+    int         midi_voice_cursor;       /* round-robin for MIDI trigger */
+} wd_instance_t;
+
+/* ── MIDI note to voice mapping ──
+ * Pads on Move send notes. We map pad positions to voices:
+ *   Voice 0-7 triggered by notes: any note triggers round-robin,
+ *   OR fixed mapping: notes 36-43 (C2-G#2) = voices 0-7
+ */
+#define MIDI_NOTE_BASE 36
+
+/* ── Page/Knob mapping tables ── */
+
+/* Mixer page: 8 volume knobs */
+static const char *MIXER_KNOB_KEYS[8] = {
+    "v1_vol", "v2_vol", "v3_vol", "v4_vol",
+    "v5_vol", "v6_vol", "v7_vol", "v8_vol"
+};
+static const char *MIXER_KNOB_NAMES[8] = {
+    "Kick", "Snare", "Tom", "Clap",
+    "Rim", "HiHat", "Cymbal", "Tom2"
+};
+
+/* General page: comp, dist, EQ low/mid/high gain, low freq, mid freq, master */
+static const char *GENERAL_KNOB_KEYS[8] = {
+    "comp", "m_dist", "eq_lo", "eq_mid",
+    "eq_hi", "lo_freq", "mid_freq", "master"
+};
+static const char *GENERAL_KNOB_NAMES[8] = {
+    "Compress", "Distort", "EQ Low", "EQ Mid",
+    "EQ High", "Lo Freq", "Mid Freq", "Master"
+};
+
+/* Per-voice page: freq, decay, wave, p.env amt, mix, cutoff, distort, preset */
+static const char *VOICE_KNOB_SUFFIXES[8] = {
+    "_freq", "_decay", "_wave", "_penv",
+    "_mix", "_cutoff", "_dist", "_preset"
+};
+static const char *VOICE_KNOB_NAMES[8] = {
+    "Freq", "Decay", "Wave", "P.Env",
+    "Mix", "Cutoff", "Distort", "Preset"
+};
+
+static const char *PRESET_NAMES[8] = {
+    "Kick", "Snare", "Tom", "Clap",
+    "Rimshot", "HiHat", "Cymbal", "Custom"
+};
+static const char *WAVE_NAMES[3] = { "Sine", "Saw", "Square" };
+static const char *FILTER_NAMES[3] = { "LP", "HP", "BP" };
+
+/* ============================================================================
+ * Parameter helpers
+ * ============================================================================ */
+
+/* Get voice knob key string: "v1_freq", "v3_decay", etc. */
+static void voice_key(char *buf, int buflen, int voice_idx, const char *suffix) {
+    snprintf(buf, buflen, "v%d%s", voice_idx + 1, suffix);
+}
+
+/* Scale a 0..1 knob value to a parameter range */
+static float knob_to_freq(float k) {
+    /* Exponential 20..20000 Hz */
+    return 20.0f * powf(1000.0f, k);
+}
+static float freq_to_knob(float f) {
+    return logf(f / 20.0f) / logf(1000.0f);
+}
+static float knob_to_cutoff(float k) {
+    return 20.0f * powf(900.0f, k);
+}
+static float cutoff_to_knob(float f) {
+    return logf(f / 20.0f) / logf(900.0f);
+}
+static float knob_to_decay(float k) {
+    /* 0.0001 .. 2.0 exponential */
+    return 0.0001f * powf(20000.0f, k);
+}
+static float decay_to_knob(float d) {
+    return logf(d / 0.0001f) / logf(20000.0f);
+}
+static float knob_to_eq_db(float k) {
+    /* 0..1 -> -12..+12 dB */
+    return (k - 0.5f) * 24.0f;
+}
+static float eq_db_to_knob(float db) {
+    return db / 24.0f + 0.5f;
+}
+static float knob_to_lo_freq(float k) {
+    return 20.0f + k * 480.0f; /* 20..500 */
+}
+static float lo_freq_to_knob(float f) {
+    return (f - 20.0f) / 480.0f;
+}
+static float knob_to_mid_freq(float k) {
+    return 200.0f * powf(40.0f, k); /* 200..8000 */
+}
+static float mid_freq_to_knob(float f) {
+    return logf(f / 200.0f) / logf(40.0f);
+}
+static float knob_to_dist(float k) {
+    return k * 50.0f; /* 0..50 dB */
+}
+static float dist_to_knob(float d) {
+    return d / 50.0f;
+}
+
+/* ============================================================================
+ * Plugin API
+ * ============================================================================ */
+
+static void *create_instance(const char *module_dir, const char *json_defaults) {
+    (void)module_dir; (void)json_defaults;
+
+    wd_instance_t *inst = calloc(1, sizeof(wd_instance_t));
+    if (!inst) return NULL;
+
+    for (int i = 0; i < NUM_VOICES; i++) {
+        voice_init(&inst->voice[i], i);
+        inst->voice_vol[i] = inst->voice[i].level;
+        inst->voice_vol_smooth[i] = inst->voice_vol[i];
+    }
+
+    master_init(&inst->master);
+    inst->current_page = 0;
+    inst->midi_voice_cursor = 0;
+
+    return inst;
+}
+
+static void destroy_instance(void *instance) {
+    free(instance);
+}
+
+static void on_midi(void *instance, const uint8_t *msg, int len, int source) {
+    wd_instance_t *inst = (wd_instance_t *)instance;
+    (void)source;
+    if (!inst || len < 3) return;
+
+    uint8_t status = msg[0] & 0xF0;
+    uint8_t note   = msg[1];
+    uint8_t vel    = msg[2];
+
+    if (status == 0x90 && vel > 0) {
+        /* Note On — map to voice */
+        int voice_idx;
+        if (note >= MIDI_NOTE_BASE && note < MIDI_NOTE_BASE + NUM_VOICES) {
+            /* Fixed mapping: C2=voice0, C#2=voice1, ... G#2=voice7 */
+            voice_idx = note - MIDI_NOTE_BASE;
+        } else {
+            /* Round-robin for other notes */
+            voice_idx = inst->midi_voice_cursor;
+            inst->midi_voice_cursor = (inst->midi_voice_cursor + 1) % NUM_VOICES;
+        }
+        voice_trigger(&inst->voice[voice_idx], (float)vel / 127.0f);
+    }
+}
+
+/* ── set_param ── */
+static void set_param(void *instance, const char *key, const char *val) {
+    wd_instance_t *inst = (wd_instance_t *)instance;
+    if (!inst || !key || !val) return;
+
+    /* Page switching */
+    if (strcmp(key, "_level") == 0) {
+        if (strcmp(val, "Mixer") == 0) inst->current_page = 0;
+        else if (strcmp(val, "General") == 0) inst->current_page = 1;
+        else {
+            /* Voice pages: "Voice 1" .. "Voice 8" */
+            for (int i = 0; i < NUM_VOICES; i++) {
+                char pg[16];
+                snprintf(pg, sizeof(pg), "Voice %d", i + 1);
+                if (strcmp(val, pg) == 0) { inst->current_page = 2 + i; break; }
+            }
+        }
+        return;
+    }
+
+    /* Knob adjust */
+    if (strncmp(key, "knob_", 5) == 0 && strstr(key, "_adjust")) {
+        int knob = atoi(key + 5) - 1;
+        if (knob < 0 || knob > 7) return;
+        int delta = atoi(val);
+        int page = inst->current_page;
+
+        if (page == 0) {
+            /* Mixer page: adjust voice volumes */
+            inst->voice_vol[knob] = clampf(inst->voice_vol[knob] + delta * 0.01f, 0.0f, 1.0f);
+        } else if (page == 1) {
+            /* General page */
+            float step = 0.01f;
+            switch (knob) {
+                case 0: inst->master.comp_amount = clampf(inst->master.comp_amount + delta * step, 0.0f, 1.0f); break;
+                case 1: inst->master.dist_amount = clampf(inst->master.dist_amount + delta * 0.5f, 0.0f, 50.0f); break;
+                case 2: inst->master.eq_low_gain = clampf(inst->master.eq_low_gain + delta * 0.24f, -12.0f, 12.0f); break;
+                case 3: inst->master.eq_mid_gain = clampf(inst->master.eq_mid_gain + delta * 0.24f, -12.0f, 12.0f); break;
+                case 4: inst->master.eq_high_gain = clampf(inst->master.eq_high_gain + delta * 0.24f, -12.0f, 12.0f); break;
+                case 5: inst->master.eq_low_freq = clampf(inst->master.eq_low_freq + delta * 4.8f, 20.0f, 500.0f); break;
+                case 6: inst->master.eq_mid_freq = clampf(inst->master.eq_mid_freq + delta * 80.0f, 200.0f, 8000.0f); break;
+                case 7: inst->master.master_level = clampf(inst->master.master_level + delta * step, 0.0f, 1.0f); break;
+            }
+        } else {
+            /* Voice page */
+            int vi = page - 2;
+            if (vi < 0 || vi >= NUM_VOICES) return;
+            wd_voice_t *v = &inst->voice[vi];
+            switch (knob) {
+                case 0: { /* Freq (exponential) */
+                    float k = freq_to_knob(v->freq);
+                    k = clampf(k + delta * 0.005f, 0.0f, 1.0f);
+                    v->freq = knob_to_freq(k);
+                } break;
+                case 1: { /* Decay (exponential) */
+                    float k = decay_to_knob(v->decay);
+                    k = clampf(k + delta * 0.01f, 0.0f, 1.0f);
+                    v->decay = knob_to_decay(k);
+                } break;
+                case 2: { /* Wave (enum) */
+                    v->wave = (v->wave + (delta > 0 ? 1 : -1) + 3) % 3;
+                } break;
+                case 3: /* P.Env Amount */
+                    v->pitch_env_amt = clampf(v->pitch_env_amt + delta * 0.01f, 0.0f, 1.0f);
+                    break;
+                case 4: /* Mix */
+                    v->mix = clampf(v->mix + delta * 0.01f, 0.0f, 1.0f);
+                    break;
+                case 5: { /* Cutoff (exponential) */
+                    float k = cutoff_to_knob(v->filter_cutoff);
+                    k = clampf(k + delta * 0.005f, 0.0f, 1.0f);
+                    v->filter_cutoff = knob_to_cutoff(k);
+                } break;
+                case 6: /* Distortion */
+                    v->distortion = clampf(v->distortion + delta * 0.5f, 0.0f, 50.0f);
+                    break;
+                case 7: { /* Preset (enum jog) */
+                    v->preset = (v->preset + (delta > 0 ? 1 : -1) + 8) % 8;
+                    if (v->preset < 7) voice_apply_preset(v, v->preset);
+                } break;
+            }
+        }
+        return;
+    }
+
+    /* Direct parameter set (state restore, presets) */
+    float f = atof(val);
+
+    /* Mixer volumes */
+    for (int i = 0; i < NUM_VOICES; i++) {
+        char k[16];
+        snprintf(k, sizeof(k), "v%d_vol", i + 1);
+        if (strcmp(key, k) == 0) { inst->voice_vol[i] = clampf(f, 0.0f, 1.0f); return; }
+    }
+
+    /* Master params */
+    if (strcmp(key, "comp") == 0) { inst->master.comp_amount = clampf(f, 0.0f, 1.0f); return; }
+    if (strcmp(key, "m_dist") == 0) { inst->master.dist_amount = clampf(f, 0.0f, 50.0f); return; }
+    if (strcmp(key, "eq_lo") == 0) { inst->master.eq_low_gain = clampf(f, -12.0f, 12.0f); return; }
+    if (strcmp(key, "eq_mid") == 0) { inst->master.eq_mid_gain = clampf(f, -12.0f, 12.0f); return; }
+    if (strcmp(key, "eq_hi") == 0) { inst->master.eq_high_gain = clampf(f, -12.0f, 12.0f); return; }
+    if (strcmp(key, "lo_freq") == 0) { inst->master.eq_low_freq = clampf(f, 20.0f, 500.0f); return; }
+    if (strcmp(key, "mid_freq") == 0) { inst->master.eq_mid_freq = clampf(f, 200.0f, 8000.0f); return; }
+    if (strcmp(key, "master") == 0) { inst->master.master_level = clampf(f, 0.0f, 1.0f); return; }
+
+    /* Per-voice params: v1_freq, v2_decay, etc. */
+    for (int i = 0; i < NUM_VOICES; i++) {
+        char k[24];
+        wd_voice_t *v = &inst->voice[i];
+
+        snprintf(k, sizeof(k), "v%d_freq", i+1);
+        if (strcmp(key, k) == 0) { v->freq = clampf(f, 20.0f, 20000.0f); return; }
+        snprintf(k, sizeof(k), "v%d_decay", i+1);
+        if (strcmp(key, k) == 0) { v->decay = clampf(f, 0.0001f, 2.0f); return; }
+        snprintf(k, sizeof(k), "v%d_wave", i+1);
+        if (strcmp(key, k) == 0) { v->wave = (int)clampf(f, 0, 2); return; }
+        snprintf(k, sizeof(k), "v%d_penv", i+1);
+        if (strcmp(key, k) == 0) { v->pitch_env_amt = clampf(f, 0.0f, 1.0f); return; }
+        snprintf(k, sizeof(k), "v%d_mix", i+1);
+        if (strcmp(key, k) == 0) { v->mix = clampf(f, 0.0f, 1.0f); return; }
+        snprintf(k, sizeof(k), "v%d_cutoff", i+1);
+        if (strcmp(key, k) == 0) { v->filter_cutoff = clampf(f, 20.0f, 18000.0f); return; }
+        snprintf(k, sizeof(k), "v%d_dist", i+1);
+        if (strcmp(key, k) == 0) { v->distortion = clampf(f, 0.0f, 50.0f); return; }
+        snprintf(k, sizeof(k), "v%d_preset", i+1);
+        if (strcmp(key, k) == 0) {
+            int p = (int)f;
+            if (p >= 0 && p < 7) voice_apply_preset(v, p);
+            else v->preset = 7;
+            return;
+        }
+        snprintf(k, sizeof(k), "v%d_attack", i+1);
+        if (strcmp(key, k) == 0) { v->attack = clampf(f, 0.0001f, 1.0f); return; }
+        snprintf(k, sizeof(k), "v%d_ndecay", i+1);
+        if (strcmp(key, k) == 0) { v->noise_decay = clampf(f, 0.0001f, 1.0f); return; }
+        snprintf(k, sizeof(k), "v%d_ftype", i+1);
+        if (strcmp(key, k) == 0) { v->filter_type = (int)clampf(f, 0, 2); return; }
+        snprintf(k, sizeof(k), "v%d_fres", i+1);
+        if (strcmp(key, k) == 0) { v->filter_res = clampf(f, 1.0f, 5.0f); return; }
+        snprintf(k, sizeof(k), "v%d_prate", i+1);
+        if (strcmp(key, k) == 0) { v->pitch_env_rate = clampf(f, 0.001f, 1.0f); return; }
+        snprintf(k, sizeof(k), "v%d_lamt", i+1);
+        if (strcmp(key, k) == 0) { v->pitch_lfo_amt = clampf(f, 0.0f, 1.0f); return; }
+        snprintf(k, sizeof(k), "v%d_lrate", i+1);
+        if (strcmp(key, k) == 0) { v->pitch_lfo_rate = clampf(f, 0.1f, 80.0f); return; }
+        snprintf(k, sizeof(k), "v%d_nattack", i+1);
+        if (strcmp(key, k) == 0) { v->noise_attack = clampf(f, 0.0001f, 1.0f); return; }
+        snprintf(k, sizeof(k), "v%d_level", i+1);
+        if (strcmp(key, k) == 0) { v->level = clampf(f, 0.0f, 1.0f); return; }
+    }
+
+    /* State restore (all params in one string) */
+    if (strcmp(key, "state") == 0) {
+        /* Parse: 8 voice volumes, master params, then per-voice params */
+        const char *p = val;
+        char token[64];
+        int ti = 0;
+
+        /* Helper: read next space-delimited token */
+        #define NEXT_TOKEN() do { \
+            while (*p == ' ') p++; \
+            ti = 0; \
+            while (*p && *p != ' ' && ti < 63) token[ti++] = *p++; \
+            token[ti] = '\0'; \
+        } while(0)
+
+        /* 8 mixer volumes */
+        for (int i = 0; i < NUM_VOICES; i++) {
+            NEXT_TOKEN();
+            inst->voice_vol[i] = clampf(atof(token), 0.0f, 1.0f);
+        }
+        /* Master: comp, dist, eq_lo, eq_mid, eq_hi, lo_freq, mid_freq, master */
+        NEXT_TOKEN(); inst->master.comp_amount = atof(token);
+        NEXT_TOKEN(); inst->master.dist_amount = atof(token);
+        NEXT_TOKEN(); inst->master.eq_low_gain = atof(token);
+        NEXT_TOKEN(); inst->master.eq_mid_gain = atof(token);
+        NEXT_TOKEN(); inst->master.eq_high_gain = atof(token);
+        NEXT_TOKEN(); inst->master.eq_low_freq = atof(token);
+        NEXT_TOKEN(); inst->master.eq_mid_freq = atof(token);
+        NEXT_TOKEN(); inst->master.master_level = atof(token);
+
+        /* Per-voice: preset freq attack decay wave penv prate lamt lrate ftype cutoff fres nattack ndecay mix dist level */
+        for (int i = 0; i < NUM_VOICES; i++) {
+            wd_voice_t *v = &inst->voice[i];
+            NEXT_TOKEN(); v->preset = atoi(token);
+            NEXT_TOKEN(); v->freq = atof(token);
+            NEXT_TOKEN(); v->attack = atof(token);
+            NEXT_TOKEN(); v->decay = atof(token);
+            NEXT_TOKEN(); v->wave = atoi(token);
+            NEXT_TOKEN(); v->pitch_env_amt = atof(token);
+            NEXT_TOKEN(); v->pitch_env_rate = atof(token);
+            NEXT_TOKEN(); v->pitch_lfo_amt = atof(token);
+            NEXT_TOKEN(); v->pitch_lfo_rate = atof(token);
+            NEXT_TOKEN(); v->filter_type = atoi(token);
+            NEXT_TOKEN(); v->filter_cutoff = atof(token);
+            NEXT_TOKEN(); v->filter_res = atof(token);
+            NEXT_TOKEN(); v->noise_attack = atof(token);
+            NEXT_TOKEN(); v->noise_decay = atof(token);
+            NEXT_TOKEN(); v->mix = atof(token);
+            NEXT_TOKEN(); v->distortion = atof(token);
+            NEXT_TOKEN(); v->level = atof(token);
+        }
+        #undef NEXT_TOKEN
+        return;
+    }
+}
+
+/* ── get_param ── */
+static int get_param(void *instance, const char *key, char *buf, int buf_len) {
+    wd_instance_t *inst = (wd_instance_t *)instance;
+    if (!inst || !key || !buf || buf_len < 1) return -1;
+
+    /* Module name */
+    if (strcmp(key, "name") == 0)
+        return snprintf(buf, buf_len, "WeirdDrum");
+
+    /* Knob names */
+    if (strncmp(key, "knob_", 5) == 0 && strstr(key, "_name")) {
+        int knob = atoi(key + 5) - 1;
+        if (knob < 0 || knob > 7) return -1;
+        int page = inst->current_page;
+
+        if (page == 0) return snprintf(buf, buf_len, "%s", MIXER_KNOB_NAMES[knob]);
+        if (page == 1) return snprintf(buf, buf_len, "%s", GENERAL_KNOB_NAMES[knob]);
+        /* Voice pages */
+        return snprintf(buf, buf_len, "%s", VOICE_KNOB_NAMES[knob]);
+    }
+
+    /* Knob values */
+    if (strncmp(key, "knob_", 5) == 0 && strstr(key, "_value")) {
+        int knob = atoi(key + 5) - 1;
+        if (knob < 0 || knob > 7) return -1;
+        int page = inst->current_page;
+
+        if (page == 0) {
+            return snprintf(buf, buf_len, "%d%%", (int)(inst->voice_vol[knob] * 100.0f));
+        }
+        if (page == 1) {
+            switch (knob) {
+                case 0: return snprintf(buf, buf_len, "%d%%", (int)(inst->master.comp_amount * 100.0f));
+                case 1: return snprintf(buf, buf_len, "%.0fdB", inst->master.dist_amount);
+                case 2: return snprintf(buf, buf_len, "%+.0fdB", inst->master.eq_low_gain);
+                case 3: return snprintf(buf, buf_len, "%+.0fdB", inst->master.eq_mid_gain);
+                case 4: return snprintf(buf, buf_len, "%+.0fdB", inst->master.eq_high_gain);
+                case 5: return snprintf(buf, buf_len, "%dHz", (int)inst->master.eq_low_freq);
+                case 6: return snprintf(buf, buf_len, "%dHz", (int)inst->master.eq_mid_freq);
+                case 7: return snprintf(buf, buf_len, "%d%%", (int)(inst->master.master_level * 100.0f));
+            }
+        }
+        /* Voice page */
+        int vi = page - 2;
+        if (vi < 0 || vi >= NUM_VOICES) return -1;
+        wd_voice_t *v = &inst->voice[vi];
+        switch (knob) {
+            case 0: return snprintf(buf, buf_len, "%dHz", (int)v->freq);
+            case 1: return snprintf(buf, buf_len, "%dms", (int)(v->decay * 1000.0f));
+            case 2: return snprintf(buf, buf_len, "%s", WAVE_NAMES[v->wave]);
+            case 3: return snprintf(buf, buf_len, "%d%%", (int)(v->pitch_env_amt * 100.0f));
+            case 4: return snprintf(buf, buf_len, "%d%%", (int)(v->mix * 100.0f));
+            case 5: return snprintf(buf, buf_len, "%dHz", (int)v->filter_cutoff);
+            case 6: return snprintf(buf, buf_len, "%.0fdB", v->distortion);
+            case 7: return snprintf(buf, buf_len, "%s", PRESET_NAMES[v->preset]);
+        }
+    }
+
+    /* chain_params */
+    if (strcmp(key, "chain_params") == 0) {
+        int n = 0;
+        n += snprintf(buf + n, buf_len - n, "[");
+        for (int i = 0; i < NUM_VOICES; i++) {
+            if (i > 0) n += snprintf(buf + n, buf_len - n, ",");
+            n += snprintf(buf + n, buf_len - n,
+                "{\"key\":\"v%d_vol\",\"name\":\"V%d Vol\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01}",
+                i + 1, i + 1);
+        }
+        n += snprintf(buf + n, buf_len - n,
+            ",{\"key\":\"comp\",\"name\":\"Compress\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01}"
+            ",{\"key\":\"m_dist\",\"name\":\"Distort\",\"type\":\"float\",\"min\":0,\"max\":50,\"step\":0.5}"
+            ",{\"key\":\"master\",\"name\":\"Master\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01}"
+            "]");
+        if (n >= buf_len) n = buf_len - 1;
+        return n;
+    }
+
+    /* State serialization */
+    if (strcmp(key, "state") == 0) {
+        int n = 0;
+        /* Mixer volumes */
+        for (int i = 0; i < NUM_VOICES; i++)
+            n += snprintf(buf + n, buf_len - n, "%.3f ", inst->voice_vol[i]);
+        /* Master */
+        n += snprintf(buf + n, buf_len - n, "%.3f %.1f %.1f %.1f %.1f %.0f %.0f %.3f ",
+            inst->master.comp_amount, inst->master.dist_amount,
+            inst->master.eq_low_gain, inst->master.eq_mid_gain, inst->master.eq_high_gain,
+            inst->master.eq_low_freq, inst->master.eq_mid_freq,
+            inst->master.master_level);
+        /* Per-voice */
+        for (int i = 0; i < NUM_VOICES; i++) {
+            wd_voice_t *v = &inst->voice[i];
+            n += snprintf(buf + n, buf_len - n,
+                "%d %.1f %.4f %.4f %d %.3f %.4f %.3f %.1f %d %.0f %.2f %.4f %.4f %.3f %.1f %.3f ",
+                v->preset, v->freq, v->attack, v->decay, v->wave,
+                v->pitch_env_amt, v->pitch_env_rate, v->pitch_lfo_amt, v->pitch_lfo_rate,
+                v->filter_type, v->filter_cutoff, v->filter_res,
+                v->noise_attack, v->noise_decay, v->mix, v->distortion, v->level);
+        }
+        if (n >= buf_len) n = buf_len - 1;
+        return n;
+    }
+
+    /* Direct parameter read */
+    for (int i = 0; i < NUM_VOICES; i++) {
+        char k[24];
+        snprintf(k, sizeof(k), "v%d_vol", i+1);
+        if (strcmp(key, k) == 0) return snprintf(buf, buf_len, "%.3f", inst->voice_vol[i]);
+    }
+    if (strcmp(key, "comp") == 0) return snprintf(buf, buf_len, "%.3f", inst->master.comp_amount);
+    if (strcmp(key, "m_dist") == 0) return snprintf(buf, buf_len, "%.1f", inst->master.dist_amount);
+    if (strcmp(key, "master") == 0) return snprintf(buf, buf_len, "%.3f", inst->master.master_level);
+
+    return -1;
+}
+
+/* ── render_block ── */
+static void render_block(void *instance, int16_t *out_lr, int frames) {
+    wd_instance_t *inst = (wd_instance_t *)instance;
+    if (!inst) {
+        memset(out_lr, 0, frames * 2 * sizeof(int16_t));
+        return;
+    }
+
+    for (int i = 0; i < frames; i++) {
+        float mix = 0.0f;
+
+        for (int v = 0; v < NUM_VOICES; v++) {
+            float vol = onepole(&inst->voice_vol_smooth[v], inst->voice_vol[v], 0.002f);
+            float sample = voice_render_sample(&inst->voice[v]);
+            mix += sample * vol;
+        }
+
+        /* Scale down (8 voices) */
+        mix *= 0.35f;
+
+        /* Master FX */
+        mix = master_process(&inst->master, mix);
+
+        /* Clamp and output stereo int16 */
+        mix = clampf(mix, -1.0f, 1.0f);
+        int16_t s = (int16_t)(mix * 32767.0f);
+        out_lr[i * 2]     = s;
+        out_lr[i * 2 + 1] = s;
+    }
+}
+
+/* ============================================================================
+ * Plugin API Export
+ * ============================================================================ */
+
+typedef struct {
+    uint32_t api_version;
+    void* (*create_instance)(const char *, const char *);
+    void  (*destroy_instance)(void *);
+    void  (*on_midi)(void *, const uint8_t *, int, int);
+    void  (*set_param)(void *, const char *, const char *);
+    int   (*get_param)(void *, const char *, char *, int);
+    void  (*render_block)(void *, int16_t *, int);
+} plugin_api_v2_t;
+
+__attribute__((visibility("default")))
+plugin_api_v2_t* move_plugin_init_v2(const void *host) {
+    (void)host;
+    static plugin_api_v2_t api = {
+        .api_version      = 2,
+        .create_instance  = create_instance,
+        .destroy_instance = destroy_instance,
+        .on_midi          = on_midi,
+        .set_param        = set_param,
+        .get_param        = get_param,
+        .render_block     = render_block,
+    };
+    return &api;
+}
