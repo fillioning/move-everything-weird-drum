@@ -1108,7 +1108,20 @@ static void set_param(void *instance, const char *key, const char *val) {
                         inst->voice[i].filter_cutoff = clampf(inst->same_freq, 20.0f, 18000.0f);
                     }
                 } break;
-                case 4: /* Rnd Pan — randomize panning (kicks stay center) */
+                case 4: /* Init Freq — restore kit frequencies + cutoffs */
+                    if (delta != 0) {
+                        inst->same_freq = 0.0f;
+                        int kit = inst->current_kit;
+                        for (int i = 0; i < NUM_VOICES; i++) {
+                            /* Temporarily apply the kit preset to a scratch voice to read freq/cutoff */
+                            wd_voice_t tmp;
+                            memset(&tmp, 0, sizeof(tmp));
+                            voice_apply_preset(&tmp, KIT_PRESETS[kit][i]);
+                            inst->voice[i].freq = tmp.freq;
+                            inst->voice[i].filter_cutoff = tmp.filter_cutoff;
+                        }
+                    } break;
+                case 5: /* Rnd Pan — randomize panning (kicks stay center) */
                     if (delta != 0) {
                         for (int i = 0; i < NUM_VOICES; i++) {
                             if (inst->voice[i].preset <= 4) /* Kicks (0-4) stay center */
@@ -1117,7 +1130,7 @@ static void set_param(void *instance, const char *key, const char *val) {
                                 inst->voice[i].pan = (inst_random(inst) * 2.0f - 1.0f) * 0.8f;
                         }
                     } break;
-                case 5: /* All Mono — reset all panning to center */
+                case 6: /* All Mono — reset all panning to center */
                     if (delta != 0) {
                         for (int i = 0; i < NUM_VOICES; i++)
                             inst->voice[i].pan = 0.0f;
@@ -1194,6 +1207,14 @@ static void set_param(void *instance, const char *key, const char *val) {
     if (strcmp(key, "kit") == 0) { apply_kit(inst, (int)clampf(f, 0, NUM_KITS-1)); return; }
     if (strcmp(key, "rnd_voice") == 0) { if (f != 0) { int vi = inst->current_page >= 3 ? inst->current_page - 3 : 0; randomize_voice(inst, vi); } return; }
     if (strcmp(key, "rnd_patch") == 0) { if (f != 0) randomize_patch(inst); return; }
+    if (strcmp(key, "init_freq") == 0) {
+        if (f != 0) {
+            inst->same_freq = 0.0f;
+            int kit = inst->current_kit;
+            for (int i=0;i<NUM_VOICES;i++) { wd_voice_t tmp; memset(&tmp,0,sizeof(tmp)); voice_apply_preset(&tmp,KIT_PRESETS[kit][i]); inst->voice[i].freq=tmp.freq; inst->voice[i].filter_cutoff=tmp.filter_cutoff; }
+        }
+        return;
+    }
     if (strcmp(key, "all_mono") == 0) {
         if (f != 0) { for (int i=0;i<NUM_VOICES;i++) inst->voice[i].pan=0.0f; }
         return;
@@ -1352,7 +1373,7 @@ static int get_param(void *instance, const char *key, char *buf, int buf_len) {
         if (page == 0) return snprintf(buf, buf_len, "%s", MIXER_KNOB_NAMES[knob]);
         if (page == 1) return snprintf(buf, buf_len, "%s", GENERAL_KNOB_NAMES[knob]);
         if (page == 2) {
-            static const char *PATCH_N[8] = {"Kit","Rnd Voice","Rnd Patch","SameFreq","Rnd Pan","All Mono","",""};
+            static const char *PATCH_N[8] = {"Kit","Rnd Voice","Rnd Patch","SameFreq","Init Freq","Rnd Pan","All Mono",""};
             return snprintf(buf, buf_len, "%s", PATCH_N[knob]);
         }
         if (page == 3) return snprintf(buf, buf_len, "%s", MIXER_KNOB_NAMES[knob]);
@@ -1394,6 +1415,7 @@ static int get_param(void *instance, const char *key, char *buf, int buf_len) {
                 case 3: return snprintf(buf, buf_len, "%dHz", inst->same_freq > 0 ? (int)inst->same_freq : 0);
                 case 4: return snprintf(buf, buf_len, "Turn");
                 case 5: return snprintf(buf, buf_len, "Turn");
+                case 6: return snprintf(buf, buf_len, "Turn");
                 default: return snprintf(buf, buf_len, "-");
             }
         }
@@ -1457,6 +1479,7 @@ static int get_param(void *instance, const char *key, char *buf, int buf_len) {
             "{\"key\":\"kit\",\"name\":\"Kit\",\"type\":\"int\",\"min\":0,\"max\":29,\"step\":1},"
             "{\"key\":\"rnd_voice\",\"name\":\"Rnd Voice\",\"type\":\"int\",\"min\":0,\"max\":1,\"step\":1},"
             "{\"key\":\"rnd_patch\",\"name\":\"Rnd Patch\",\"type\":\"int\",\"min\":0,\"max\":1,\"step\":1},"
+            "{\"key\":\"init_freq\",\"name\":\"Init Freq\",\"type\":\"int\",\"min\":0,\"max\":1,\"step\":1},"
             "{\"key\":\"rnd_pan\",\"name\":\"Rnd Pan\",\"type\":\"int\",\"min\":0,\"max\":1,\"step\":1},"
             "{\"key\":\"all_mono\",\"name\":\"All Mono\",\"type\":\"int\",\"min\":0,\"max\":1,\"step\":1},"
             "{\"key\":\"v1_pan\",\"name\":\"V1 Pan\",\"type\":\"float\",\"min\":-1,\"max\":1,\"step\":0.02},"
@@ -1630,8 +1653,8 @@ static int get_param(void *instance, const char *key, char *buf, int buf_len) {
             "\"knobs\":[\"comp\",\"dj_filter\",\"eq_lo\",\"lo_freq\",\"eq_mid\",\"mid_freq\",\"eq_hi\",\"hi_freq\"],"
             "\"params\":[\"comp\",\"dj_filter\",\"eq_lo\",\"lo_freq\",\"eq_mid\",\"mid_freq\",\"eq_hi\",\"hi_freq\",\"q_lo\",\"q_mid\",\"q_hi\",\"master\"]},"
             "\"Patch\":{\"label\":\"Patch\","
-            "\"knobs\":[\"kit\",\"rnd_voice\",\"rnd_patch\",\"same_freq\",\"rnd_pan\",\"all_mono\"],"
-            "\"params\":[\"kit\",\"rnd_voice\",\"rnd_patch\",\"same_freq\",\"rnd_pan\",\"all_mono\"]},"
+            "\"knobs\":[\"kit\",\"rnd_voice\",\"rnd_patch\",\"same_freq\",\"init_freq\",\"rnd_pan\",\"all_mono\"],"
+            "\"params\":[\"kit\",\"rnd_voice\",\"rnd_patch\",\"same_freq\",\"init_freq\",\"rnd_pan\",\"all_mono\"]},"
             "\"Pan\":{\"label\":\"Pan\","
             "\"knobs\":[\"v1_pan\",\"v2_pan\",\"v3_pan\",\"v4_pan\",\"v5_pan\",\"v6_pan\",\"v7_pan\",\"v8_pan\"],"
             "\"params\":[\"v1_pan\",\"v2_pan\",\"v3_pan\",\"v4_pan\",\"v5_pan\",\"v6_pan\",\"v7_pan\",\"v8_pan\"]},"
@@ -1718,6 +1741,7 @@ static int get_param(void *instance, const char *key, char *buf, int buf_len) {
     if (strcmp(key, "rnd_voice") == 0) return snprintf(buf, buf_len, "0");
     if (strcmp(key, "rnd_patch") == 0) return snprintf(buf, buf_len, "0");
     if (strcmp(key, "rnd_pan") == 0) return snprintf(buf, buf_len, "0");
+    if (strcmp(key, "init_freq") == 0) return snprintf(buf, buf_len, "0");
     if (strcmp(key, "all_mono") == 0) return snprintf(buf, buf_len, "0");
     if (strcmp(key, "same_freq") == 0) return snprintf(buf, buf_len, "%d", inst->same_freq > 0 ? (int)inst->same_freq : 0);
     if (strcmp(key, "master") == 0) return snprintf(buf, buf_len, "%.4f", inst->master.master_level);
