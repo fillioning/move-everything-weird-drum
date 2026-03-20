@@ -1,10 +1,10 @@
 {
-    "id": "weird-drum",
-    "name": "Weird Drum",
+    "id": "weird-dreams",
+    "name": "Weird Dreams",
     "abbrev": "WDRM",
-    "version": "1.0.0",
+    "version": "0.1.0",
     "api_version": 2,
-    "description": "8-voice analog drum synthesizer — WeirdDrums port with mixer, master FX, per-voice pages",
+    "description": "8-voice analog drum machine with 64 kits, 41 voice presets, 96 musical pitch scales, master bus FX, and per-voice pages",
     "author": "Vincent Fillion (DSP: Daniele Filaretti, MIT)",
     "license": "MIT",
     "dsp": "dsp.so",
@@ -29,7 +29,7 @@
         "ui_hierarchy": {
             "levels": {
                 "root": {
-                    "name": "Weird Drum",
+                    "name": "Weird Dreams",
                     "knobs": ["v1_vol", "v2_vol", "v3_vol", "v4_vol", "v5_vol", "v6_vol", "v7_vol", "v8_vol"],
                     "params": [
                         {"level": "Mixer", "label": "Mixer"},
@@ -58,8 +58,8 @@
                 },
                 "Patch": {
                     "label": "Patch",
-                    "knobs": ["kit", "rnd_voice", "rnd_patch", "same_freq", "init_freq", "rnd_pan", "all_mono"],
-                    "params": ["kit", "rnd_voice", "rnd_patch", "same_freq", "init_freq", "rnd_pan", "all_mono"]
+                    "knobs": ["kit", "rnd_kit", "rnd_voice", "rnd_pitch", "same_freq", "init_freq", "rnd_pan", "all_mono"],
+                    "params": ["kit", "rnd_kit", "rnd_voice", "rnd_pitch", "same_freq", "init_freq", "rnd_pan", "all_mono"]
                 },
                 "Pan": {
                     "label": "Pan",

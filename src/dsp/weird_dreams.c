@@ -1,5 +1,5 @@
 /* ============================================================================
- * Weird Drum Machine — 8-voice analog drum synthesizer for Ableton Move
+ * Weird Dreams — 8-voice analog drum synthesizer for Ableton Move
  * Port of dfilaretti/WeirdDrums (MIT) to Move Everything framework
  *
  * Architecture: 8 independent drum voices, each with:
@@ -773,46 +773,94 @@ static float master_process(wd_master_t *m, float in) {
  * ============================================================================ */
 
 /* ── 30 Kit presets: each defines 8 voice preset indices ── */
-#define NUM_KITS 30
+#define NUM_KITS 64
 static const int KIT_PRESETS[NUM_KITS][8] = {
+    /*  Kick  Snare Tom   Clap  Perc  HH-C  HH-O  Cymbal       */
+    /* ── Classic machines ── */
     /* 0  Default */     { 0, 5, 10, 25, 30, 15, 16, 20 },
     /* 1  808 */         { 0, 5, 10, 25, 31, 15, 16, 20 },
     /* 2  909 */         { 1, 6, 11, 26, 30, 15, 16, 20 },
-    /* 3  Minimal */     { 1, 5, 10, 29, 32, 15, 16, 24 },
-    /* 4  Industrial */  { 2, 8, 13, 28, 31, 18, 19, 21 },
-    /* 5  Lo-Fi */       { 3, 7, 10, 27, 33, 19, 17, 23 },
-    /* 6  Techno */      { 1, 6, 13, 25, 30, 15, 16, 20 },
-    /* 7  House */       { 0, 5, 14, 25, 33, 15, 16, 20 },
-    /* 8  Electro */     { 2, 9, 12, 26, 32, 18, 16, 21 },
-    /* 9  Hip Hop */     { 0, 7, 14, 27, 30, 15, 16, 23 },
-    /* 10 Trap */        { 0, 6, 11, 25, 30, 15, 16, 24 },
-    /* 11 DnB */         { 1, 8, 12, 29, 34, 15, 16, 20 },
-    /* 12 Dub */         { 4, 7, 10, 27, 31, 17, 16, 23 },
-    /* 13 Ambient */     { 4, 9, 14, 27, 33, 17, 16, 24 },
-    /* 14 Noise */       { 3, 9, 13, 28, 39, 19, 19, 36 },
-    /* 15 Glitch */      { 2, 8, 13, 28, 35, 18, 19, 36 },
-    /* 16 Perc Only */   { 30, 31, 32, 33, 34, 14, 11, 12 },
-    /* 17 FX Only */     { 35, 36, 37, 38, 39, 35, 38, 37 },
-    /* 18 All Kicks */   { 0, 1, 2, 3, 4, 0, 1, 2 },
-    /* 19 All Snares */  { 5, 6, 7, 8, 9, 5, 6, 7 },
-    /* 20 All Toms */    { 10, 11, 12, 13, 14, 10, 11, 12 },
-    /* 21 All HH */      { 15, 16, 17, 18, 19, 15, 16, 17 },
-    /* 22 All Cymbals */ { 20, 21, 22, 23, 24, 20, 21, 22 },
-    /* 23 All Claps */   { 25, 26, 27, 28, 29, 25, 26, 27 },
-    /* 24 Metal */       { 2, 8, 13, 28, 31, 18, 19, 22 },
-    /* 25 Organic */     { 4, 7, 14, 27, 33, 17, 16, 23 },
-    /* 26 Bright */      { 1, 6, 12, 26, 32, 15, 16, 21 },
-    /* 27 Dark */        { 0, 7, 10, 27, 31, 19, 17, 23 },
-    /* 28 Fast */        { 1, 6, 12, 26, 30, 15, 15, 38 },
-    /* 29 Weird */       { 2, 8, 13, 28, 35, 18, 19, 36 },
+    /* 3  LinnDrum */    { 1, 5, 11, 25, 34, 15, 16, 21 },
+    /* 4  CR-78 */       { 4, 9, 14, 29, 31, 17, 16, 23 },
+    /* ── Genre kits ── */
+    /* 5  Techno */      { 1, 6, 13, 25, 30, 15, 16, 20 },
+    /* 6  House */       { 0, 5, 14, 25, 33, 15, 16, 20 },
+    /* 7  Electro */     { 2, 9, 12, 26, 32, 18, 16, 21 },
+    /* 8  Hip Hop */     { 0, 7, 14, 27, 30, 15, 16, 23 },
+    /* 9  Trap */        { 0, 6, 11, 25, 30, 15, 16, 24 },
+    /* 10 DnB */         { 1, 8, 12, 29, 34, 15, 16, 20 },
+    /* 11 Dub */         { 4, 7, 10, 27, 31, 17, 16, 23 },
+    /* 12 Garage */      { 0, 6, 11, 25, 34, 15, 16, 20 },
+    /* 13 Jungle */      { 1, 8, 12, 26, 30, 15, 16, 20 },
+    /* 14 Breakbeat */   { 1, 7, 11, 26, 30, 15, 16, 21 },
+    /* 15 Reggaeton */   { 0, 6, 14, 25, 31, 15, 16, 20 },
+    /* 16 Afrobeat */    { 0, 5, 14, 25, 31, 15, 17, 24 },
+    /* 17 Disco */       { 0, 5, 10, 25, 33, 15, 16, 21 },
+    /* 18 Funk */        { 1, 5, 10, 25, 32, 15, 16, 20 },
+    /* 19 New Wave */    { 2, 6, 12, 26, 35, 18, 16, 21 },
+    /* 20 Synthwave */   { 0, 6, 13, 25, 32, 15, 16, 24 },
+    /* 21 EBM */         { 2, 8, 13, 28, 32, 18, 19, 21 },
+    /* 22 Footwork */    { 1, 8, 11, 26, 30, 15, 15, 38 },
+    /* 23 Gqom */        { 0, 9, 10, 28, 30, 19, 16, 20 },
+    /* 24 Jersey Club */ { 1, 6, 12, 25, 30, 15, 16, 38 },
+    /* ── Character kits ── */
+    /* 25 Minimal */     { 1, 5, 10, 29, 32, 15, 16, 24 },
+    /* 26 Industrial */  { 2, 8, 13, 28, 31, 18, 19, 21 },
+    /* 27 Lo-Fi */       { 3, 7, 10, 27, 33, 19, 17, 23 },
+    /* 28 Ambient */     { 4, 9, 14, 27, 33, 17, 16, 24 },
+    /* 29 Noise */       { 3, 9, 13, 28, 39, 19, 19, 36 },
+    /* 30 Glitch */      { 2, 8, 13, 28, 35, 18, 19, 36 },
+    /* 31 Metal */       { 2, 8, 13, 28, 31, 18, 19, 22 },
+    /* 32 Organic */     { 4, 7, 14, 27, 33, 17, 16, 23 },
+    /* 33 Bright */      { 1, 6, 12, 26, 32, 15, 16, 21 },
+    /* 34 Dark */        { 0, 7, 10, 27, 31, 19, 17, 23 },
+    /* 35 Fast */        { 1, 6, 12, 26, 30, 15, 15, 38 },
+    /* 36 Weird */       { 2, 8, 13, 28, 35, 18, 19, 36 },
+    /* 37 Dusty */       { 3, 7, 14, 27, 33, 19, 17, 23 },
+    /* 38 Crispy */      { 1, 8, 12, 26, 32, 18, 15, 22 },
+    /* 39 Heavy */       { 2, 7, 10, 27, 31, 19, 19, 23 },
+    /* 40 Tight */       { 1, 6, 12, 26, 30, 15, 15, 21 },
+    /* 41 Loose */       { 4, 7, 14, 27, 34, 17, 16, 24 },
+    /* 42 Saturated */   { 2, 8, 13, 28, 31, 18, 19, 22 },
+    /* 43 Clean */       { 0, 5, 10, 29, 33, 15, 16, 20 },
+    /* 44 Punchy */      { 1, 6, 11, 26, 30, 15, 16, 20 },
+    /* 45 Muted */       { 3, 9, 10, 27, 33, 17, 17, 23 },
+    /* 46 Fizzy */       { 2, 9, 12, 28, 34, 18, 16, 24 },
+    /* 47 Thump */       { 0, 7, 10, 25, 31, 19, 17, 23 },
+    /* 48 Micro */       { 1, 6, 12, 29, 32, 15, 15, 38 },
+    /* ── Specialized kits ── */
+    /* 49 Perc Only */   { 30, 31, 32, 33, 34, 14, 11, 12 },
+    /* 50 FX Only */     { 35, 36, 37, 38, 39, 35, 38, 37 },
+    /* 51 Clap Lab */    { 25, 26, 27, 28, 29, 25, 26, 27 },
+    /* 52 Tom Rack */    { 10, 11, 12, 13, 14, 10, 11, 12 },
+    /* 53 HH Stack */    { 15, 16, 17, 18, 19, 15, 16, 17 },
+    /* 54 Cymbal Wash */ { 20, 21, 22, 23, 24, 20, 21, 22 },
+    /* 55 Kick Army */   { 0, 1, 2, 3, 4, 0, 1, 2 },
+    /* 56 Snare Rack */  { 5, 6, 7, 8, 9, 5, 6, 7 },
+    /* ── Hybrid / crossover kits ── */
+    /* 57 Kick+Perc */   { 0, 1, 30, 31, 32, 33, 34, 14 },
+    /* 58 Snare+FX */    { 5, 6, 7, 8, 35, 36, 38, 39 },
+    /* 59 Tom+Cymbal */  { 10, 11, 12, 20, 21, 22, 23, 24 },
+    /* 60 808+FX */      { 0, 5, 10, 25, 35, 15, 36, 37 },
+    /* 61 909+Perc */    { 1, 6, 11, 26, 30, 31, 32, 34 },
+    /* 62 Drone Kit */   { 4, 37, 37, 39, 37, 17, 16, 24 },
+    /* 63 Chaos */       { 35, 36, 37, 38, 39, 28, 36, 35 },
 };
 static const char *KIT_NAMES[NUM_KITS] = {
-    "Default", "808", "909", "Minimal", "Industrial",
-    "Lo-Fi", "Techno", "House", "Electro", "Hip Hop",
-    "Trap", "DnB", "Dub", "Ambient", "Noise",
-    "Glitch", "Perc Only", "FX Only", "All Kicks", "All Snares",
-    "All Toms", "All HH", "All Cymbal", "All Claps", "Metal",
-    "Organic", "Bright", "Dark", "Fast", "Weird"
+    "Default", "808", "909", "LinnDrum", "CR-78",
+    "Techno", "House", "Electro", "Hip Hop", "Trap",
+    "DnB", "Dub", "Garage", "Jungle", "Breakbeat",
+    "Reggaetn", "Afrobeat", "Disco", "Funk", "New Wave",
+    "Synthwav", "EBM", "Footwork", "Gqom", "JrsyClub",
+    "Minimal", "Industrl", "Lo-Fi", "Ambient", "Noise",
+    "Glitch", "Metal", "Organic", "Bright", "Dark",
+    "Fast", "Weird", "Dusty", "Crispy", "Heavy",
+    "Tight", "Loose", "Saturatn", "Clean", "Punchy",
+    "Muted", "Fizzy", "Thump", "Micro",
+    "PercOnly", "FX Only", "Clap Lab", "Tom Rack", "HH Stack",
+    "CymbWash", "KickArmy", "SnrRack",
+    "Kick+Prc", "Snare+FX", "Tom+Cymb", "808+FX", "909+Perc",
+    "DroneKit", "Chaos"
 };
 
 typedef struct {
@@ -825,6 +873,7 @@ typedef struct {
     int         midi_voice_cursor;       /* round-robin for MIDI trigger */
     int         current_kit;             /* 0..29 kit preset index */
     float       same_freq;               /* 0=off, >0 = master freq override (20..20000) */
+    int         current_pitch_scale;     /* last applied pitch scale index (-1=none) */
     uint32_t    rng_state;               /* RNG for randomize */
 } wd_instance_t;
 
@@ -863,6 +912,147 @@ static void randomize_patch(wd_instance_t *inst) {
     for (int i = 0; i < NUM_VOICES; i++) {
         randomize_voice(inst, i);
         inst->voice_vol[i] = 0.5f + inst_random(inst) * 0.4f;
+    }
+}
+
+/* ── Random Pitch: 96 musically-tuned pitch scales ──
+ * 8 categories × 12 roots (all chromatic notes in every category).
+ * Each scale is generated from an interval pattern transposed by root.
+ * On trigger, each voice gets its note placed in the octave
+ * that fits its preset category's frequency range.
+ */
+#define NUM_PITCH_SCALES 96
+#define NUM_SCALE_PATTERNS 15
+
+/* Interval patterns: 8 semitone offsets from root for 8 voices.
+ * 7-note scales repeat the root; 5-6 note scales repeat key tones. */
+static const int SCALE_PATTERNS[NUM_SCALE_PATTERNS][8] = {
+    {0,2,4,5,7,9,11,0},     /*  0: Major (Ionian)      */
+    {0,2,3,5,7,8,10,0},     /*  1: Natural minor       */
+    {0,2,4,7,9,0,4,7},      /*  2: Pentatonic major    */
+    {0,3,5,7,10,0,5,7},     /*  3: Pentatonic minor    */
+    {0,3,5,6,7,10,3,7},     /*  4: Blues                */
+    {0,2,3,5,7,9,10,0},     /*  5: Dorian              */
+    {0,1,3,5,7,8,10,0},     /*  6: Phrygian            */
+    {0,2,4,6,7,9,11,0},     /*  7: Lydian              */
+    {0,2,4,5,7,9,10,0},     /*  8: Mixolydian          */
+    {0,2,3,5,7,8,11,0},     /*  9: Harmonic minor      */
+    {0,2,3,5,7,9,11,0},     /* 10: Melodic minor       */
+    {0,2,4,6,8,10,0,6},     /* 11: Whole tone          */
+    {0,2,3,5,6,8,9,11},     /* 12: Diminished (h-w)    */
+    {0,1,4,5,7,8,11,0},     /* 13: Hungarian minor     */
+    {0,1,5,7,10,0,5,7},     /* 14: Japanese In         */
+};
+
+static const char *PATTERN_NAMES[NUM_SCALE_PATTERNS] = {
+    "Maj","min","M.Pn","m.Pn","Blue",
+    "Dori","Phry","Lydi","Mixo",
+    "H.mn","Ml.m",
+    "Whol","Dimn","Hung","Japn",
+};
+
+static const char *ROOT_NAMES[12] = {
+    "C","Db","D","Eb","E","F","F#","G","Ab","A","Bb","B"
+};
+
+/* 8 categories × 12 roots = 96 scales.
+ * Categories with sub-types cycle through them across roots:
+ *   Modes:   Dorian→Phrygian→Lydian→Mixolydian (3 roots each)
+ *   Har/Mel: Harmonic→Melodic (6 roots each)
+ *   Exotic:  WholeTone→Diminished→Hungarian→Japanese (3 roots each) */
+static void scale_info(int scale_idx, int *out_pattern, int *out_root) {
+    int cat = scale_idx / 12;
+    int ri = scale_idx % 12;
+    *out_root = ri;
+    switch (cat) {
+        case 0: *out_pattern = 0;  break;            /* Major       */
+        case 1: *out_pattern = 1;  break;            /* Minor       */
+        case 2: *out_pattern = 2;  break;            /* Pent Major  */
+        case 3: *out_pattern = 3;  break;            /* Pent Minor  */
+        case 4: *out_pattern = 4;  break;            /* Blues        */
+        case 5: *out_pattern = 5 + (ri % 4);  break; /* Modes       */
+        case 6: *out_pattern = 9 + (ri % 2);  break; /* Harm/Mel    */
+        case 7: *out_pattern = 11 + (ri % 4); break; /* Exotic      */
+        default: *out_pattern = 0; break;
+    }
+}
+
+/* MIDI range per preset category — based on real hardware drum synth tuning:
+ *   808/909 kick: 30-80Hz, RYTM/Nord Drum: 20-200Hz, DRM1: 35-200Hz
+ *   808 snare: 150-350Hz, 909: 150-400Hz, RYTM: 80-400Hz, Nord: 100-500Hz
+ *   808 toms: 80-400Hz across low/mid/high, RYTM: 40-400Hz
+ *   808 hats: metallic osc 200-800Hz, RYTM: 200-800Hz
+ *   Cymbals: tone component 150-800Hz
+ *   808 clap: noise-based 200-1200Hz tonal body
+ *   Perc (cowbell 560-800, rimshot 200-800, clave 2000-3000): wide 150-1600Hz
+ *   FX: full synth range 40-1600Hz
+ */
+static void category_midi_range(int preset, int *out_min, int *out_max) {
+    if (preset <= 4)       { *out_min = 24; *out_max = 47; }  /* Kicks:  C1-B2  (32-123Hz)  */
+    else if (preset <= 9)  { *out_min = 40; *out_max = 67; }  /* Snares: E2-G4  (82-392Hz)  */
+    else if (preset <= 14) { *out_min = 31; *out_max = 65; }  /* Toms:   G1-F4  (49-349Hz)  */
+    else if (preset <= 19) { *out_min = 55; *out_max = 79; }  /* Hats:   G3-G5  (196-784Hz) */
+    else if (preset <= 24) { *out_min = 50; *out_max = 79; }  /* Cymb:   D3-G5  (147-784Hz) */
+    else if (preset <= 29) { *out_min = 55; *out_max = 84; }  /* Claps:  G3-C6  (196-1047Hz)*/
+    else if (preset <= 34) { *out_min = 50; *out_max = 88; }  /* Perc:   D3-E6  (147-1319Hz)*/
+    else if (preset <= 39) { *out_min = 28; *out_max = 88; }  /* FX:     E1-E6  (41-1319Hz) */
+    else                   { *out_min = 36; *out_max = 79; }  /* Custom: C2-G5  (65-784Hz)  */
+}
+
+static float midi_to_freq(int note) {
+    return 440.0f * powf(2.0f, (float)(note - 69) / 12.0f);
+}
+
+/* Find all octaves where this semitone falls within [min_midi, max_midi],
+ * then pick one randomly for variety across repeated presses */
+static float fit_semitone_to_range(int semitone, int min_midi, int max_midi, wd_instance_t *inst) {
+    int candidates[8];
+    int count = 0;
+    for (int oct = 0; oct < 9; oct++) {
+        int midi = oct * 12 + semitone;
+        if (midi >= min_midi && midi <= max_midi)
+            candidates[count++] = midi;
+    }
+    if (count == 0)
+        return midi_to_freq((min_midi + max_midi) / 2);
+    int idx = (int)(inst_random(inst) * (float)count) % count;
+    return midi_to_freq(candidates[idx]);
+}
+
+/* Noise filter cutoff ratio per category — derived from preset freq:cutoff averages.
+ * Kicks: 38→250(6.6x), 65→600(9.2x), 50→500(10x) ≈ 8x
+ * Snares: 190→3500(18x), 220→4000(18x), 150→2000(13x) ≈ 16x
+ * Toms: 75→700(9x), 130→900(7x), 200→1200(6x) ≈ 7x
+ * HH: 450→9000(20x), 420→6500(15x), 380→7000(18x) ≈ 16x
+ * Cymbals: 280→4500(16x), 600→5500(9x), 250→3000(12x) ≈ 12x
+ * Claps: 800→1800(2.3x), 700→1500(2.1x), 1200→3000(2.5x) ≈ 2.5x
+ * Perc: 500→4000(8x), 560→2200(4x), 2500→3000(1.2x) ≈ 4x
+ * FX: 1200→8000(6.7x), 320→3000(9.4x), 60→1500(25x) ≈ 6x */
+static float category_noise_cutoff_ratio(int preset) {
+    if (preset <= 4)  return 8.0f;   /* Kicks  */
+    if (preset <= 9)  return 16.0f;  /* Snares */
+    if (preset <= 14) return 7.0f;   /* Toms   */
+    if (preset <= 19) return 16.0f;  /* HH     */
+    if (preset <= 24) return 12.0f;  /* Cymbals*/
+    if (preset <= 29) return 2.5f;   /* Claps  */
+    if (preset <= 34) return 4.0f;   /* Perc   */
+    if (preset <= 39) return 6.0f;   /* FX     */
+    return 6.0f;                     /* Custom */
+}
+
+static void randomize_pitch(wd_instance_t *inst) {
+    int si = (int)(inst_random(inst) * NUM_PITCH_SCALES) % NUM_PITCH_SCALES;
+    inst->current_pitch_scale = si;
+    int pat, root;
+    scale_info(si, &pat, &root);
+    for (int i = 0; i < NUM_VOICES; i++) {
+        int semitone = (SCALE_PATTERNS[pat][i] + root) % 12;
+        int min_m, max_m;
+        category_midi_range(inst->voice[i].preset, &min_m, &max_m);
+        float f = fit_semitone_to_range(semitone, min_m, max_m, inst);
+        inst->voice[i].freq = f;
+        float ratio = category_noise_cutoff_ratio(inst->voice[i].preset);
+        inst->voice[i].filter_cutoff = clampf(f * ratio, 20.0f, 18000.0f);
     }
 }
 
@@ -1004,6 +1194,7 @@ static void *create_instance(const char *module_dir, const char *json_defaults) 
     inst->midi_voice_cursor = 0;
     inst->current_kit = 0;
     inst->same_freq = 0.0f;
+    inst->current_pitch_scale = -1;
     inst->rng_state = 987654321u;
 
     return inst;
@@ -1085,21 +1276,24 @@ static void set_param(void *instance, const char *key, const char *val) {
                 case 7: inst->master.eq_high_freq = clampf(inst->master.eq_high_freq + delta * 160.0f, 2000.0f, 18000.0f); break;
             }
         } else if (page == 2) {
-            /* Patch page: Kit, Rnd Voice, Rnd Patch, SameFreq, RndPan + 3 unused */
+            /* Patch page: Kit, Rnd Kit, Rnd Voice, Rnd Pitch, SameFreq, Init Freq, Rnd Pan, All Mono */
             switch (knob) {
                 case 0: { /* Kit (jog) */
                     inst->current_kit = (inst->current_kit + (delta > 0 ? 1 : -1) + NUM_KITS) % NUM_KITS;
                     apply_kit(inst, inst->current_kit);
                 } break;
-                case 1: /* Rnd Voice — randomize the last-played voice */
+                case 1: /* Rnd Kit — randomize entire kit */
+                    if (delta != 0) randomize_patch(inst);
+                    break;
+                case 2: /* Rnd Voice — randomize the last-played voice */
                     if (delta != 0) {
                         int vi = inst->current_page >= 4 ? inst->current_page - 4 : 0;
                         randomize_voice(inst, vi);
                     } break;
-                case 2: /* Rnd Patch — randomize entire kit */
-                    if (delta != 0) randomize_patch(inst);
+                case 3: /* Rnd Pitch — apply a random musical scale to all voices */
+                    if (delta != 0) randomize_pitch(inst);
                     break;
-                case 3: { /* SameFreq — master frequency + filter cutoff for all voices */
+                case 4: { /* SameFreq — master frequency + filter cutoff for all voices */
                     float k = inst->same_freq > 0.0f ? freq_to_knob(inst->same_freq) : 0.5f;
                     k = clampf(k + delta * 0.005f, 0.0f, 1.0f);
                     inst->same_freq = knob_to_freq(k);
@@ -1108,12 +1302,11 @@ static void set_param(void *instance, const char *key, const char *val) {
                         inst->voice[i].filter_cutoff = clampf(inst->same_freq, 20.0f, 18000.0f);
                     }
                 } break;
-                case 4: /* Init Freq — restore kit frequencies + cutoffs */
+                case 5: /* Init Freq — restore kit frequencies + cutoffs */
                     if (delta != 0) {
                         inst->same_freq = 0.0f;
                         int kit = inst->current_kit;
                         for (int i = 0; i < NUM_VOICES; i++) {
-                            /* Temporarily apply the kit preset to a scratch voice to read freq/cutoff */
                             wd_voice_t tmp;
                             memset(&tmp, 0, sizeof(tmp));
                             voice_apply_preset(&tmp, KIT_PRESETS[kit][i]);
@@ -1121,16 +1314,16 @@ static void set_param(void *instance, const char *key, const char *val) {
                             inst->voice[i].filter_cutoff = tmp.filter_cutoff;
                         }
                     } break;
-                case 5: /* Rnd Pan — randomize panning (kicks stay center) */
+                case 6: /* Rnd Pan — randomize panning (kicks stay center) */
                     if (delta != 0) {
                         for (int i = 0; i < NUM_VOICES; i++) {
-                            if (inst->voice[i].preset <= 4) /* Kicks (0-4) stay center */
+                            if (inst->voice[i].preset <= 4)
                                 inst->voice[i].pan = 0.0f;
                             else
                                 inst->voice[i].pan = (inst_random(inst) * 2.0f - 1.0f) * 0.8f;
                         }
                     } break;
-                case 6: /* All Mono — reset all panning to center */
+                case 7: /* All Mono — reset all panning to center */
                     if (delta != 0) {
                         for (int i = 0; i < NUM_VOICES; i++)
                             inst->voice[i].pan = 0.0f;
@@ -1205,8 +1398,9 @@ static void set_param(void *instance, const char *key, const char *val) {
     if (strcmp(key, "q_mid") == 0) { inst->master.eq_mid_q = clampf(f, 0.3f, 8.0f); return; }
     if (strcmp(key, "q_hi") == 0) { inst->master.eq_high_q = clampf(f, 0.3f, 8.0f); return; }
     if (strcmp(key, "kit") == 0) { apply_kit(inst, (int)clampf(f, 0, NUM_KITS-1)); return; }
-    if (strcmp(key, "rnd_voice") == 0) { if (f != 0) { int vi = inst->current_page >= 3 ? inst->current_page - 3 : 0; randomize_voice(inst, vi); } return; }
-    if (strcmp(key, "rnd_patch") == 0) { if (f != 0) randomize_patch(inst); return; }
+    if (strcmp(key, "rnd_voice") == 0) { if (f != 0) { int vi = inst->current_page >= 4 ? inst->current_page - 4 : 0; randomize_voice(inst, vi); } return; }
+    if (strcmp(key, "rnd_kit") == 0) { if (f != 0) randomize_patch(inst); return; }
+    if (strcmp(key, "rnd_pitch") == 0) { if (f != 0) randomize_pitch(inst); return; }
     if (strcmp(key, "init_freq") == 0) {
         if (f != 0) {
             inst->same_freq = 0.0f;
@@ -1362,7 +1556,7 @@ static int get_param(void *instance, const char *key, char *buf, int buf_len) {
 
     /* Module name */
     if (strcmp(key, "name") == 0)
-        return snprintf(buf, buf_len, "WDrm");
+        return snprintf(buf, buf_len, "WDrms");
 
     /* Knob names */
     if (strncmp(key, "knob_", 5) == 0 && strstr(key, "_name")) {
@@ -1373,7 +1567,7 @@ static int get_param(void *instance, const char *key, char *buf, int buf_len) {
         if (page == 0) return snprintf(buf, buf_len, "%s", MIXER_KNOB_NAMES[knob]);
         if (page == 1) return snprintf(buf, buf_len, "%s", GENERAL_KNOB_NAMES[knob]);
         if (page == 2) {
-            static const char *PATCH_N[8] = {"Kit","Rnd Voice","Rnd Patch","SameFreq","Init Freq","Rnd Pan","All Mono",""};
+            static const char *PATCH_N[8] = {"Kit","Rnd Kit","Rnd Voice","Rnd Pitch","SameFreq","Init Freq","Rnd Pan","All Mono"};
             return snprintf(buf, buf_len, "%s", PATCH_N[knob]);
         }
         if (page == 3) return snprintf(buf, buf_len, "%s", MIXER_KNOB_NAMES[knob]);
@@ -1412,11 +1606,18 @@ static int get_param(void *instance, const char *key, char *buf, int buf_len) {
                 case 0: return snprintf(buf, buf_len, "%s", KIT_NAMES[inst->current_kit]);
                 case 1: return snprintf(buf, buf_len, "Turn");
                 case 2: return snprintf(buf, buf_len, "Turn");
-                case 3: return snprintf(buf, buf_len, "%dHz", inst->same_freq > 0 ? (int)inst->same_freq : 0);
-                case 4: return snprintf(buf, buf_len, "Turn");
+                case 3: {
+                    if (inst->current_pitch_scale >= 0) {
+                        int pat, root;
+                        scale_info(inst->current_pitch_scale, &pat, &root);
+                        return snprintf(buf, buf_len, "%s %s", ROOT_NAMES[root], PATTERN_NAMES[pat]);
+                    }
+                    return snprintf(buf, buf_len, "Turn");
+                }
+                case 4: return snprintf(buf, buf_len, "%dHz", inst->same_freq > 0 ? (int)inst->same_freq : 0);
                 case 5: return snprintf(buf, buf_len, "Turn");
                 case 6: return snprintf(buf, buf_len, "Turn");
-                default: return snprintf(buf, buf_len, "-");
+                case 7: return snprintf(buf, buf_len, "Turn");
             }
         }
         if (page == 3) {
@@ -1476,9 +1677,10 @@ static int get_param(void *instance, const char *key, char *buf, int buf_len) {
             "{\"key\":\"q_lo\",\"name\":\"Lo Q\",\"type\":\"float\",\"min\":0.3,\"max\":8,\"step\":0.1},"
             "{\"key\":\"q_mid\",\"name\":\"Mid Q\",\"type\":\"float\",\"min\":0.3,\"max\":8,\"step\":0.1},"
             "{\"key\":\"q_hi\",\"name\":\"Hi Q\",\"type\":\"float\",\"min\":0.3,\"max\":8,\"step\":0.1},"
-            "{\"key\":\"kit\",\"name\":\"Kit\",\"type\":\"int\",\"min\":0,\"max\":29,\"step\":1},"
+            "{\"key\":\"kit\",\"name\":\"Kit\",\"type\":\"int\",\"min\":0,\"max\":63,\"step\":1},"
+            "{\"key\":\"rnd_kit\",\"name\":\"Rnd Kit\",\"type\":\"int\",\"min\":0,\"max\":1,\"step\":1},"
             "{\"key\":\"rnd_voice\",\"name\":\"Rnd Voice\",\"type\":\"int\",\"min\":0,\"max\":1,\"step\":1},"
-            "{\"key\":\"rnd_patch\",\"name\":\"Rnd Patch\",\"type\":\"int\",\"min\":0,\"max\":1,\"step\":1},"
+            "{\"key\":\"rnd_pitch\",\"name\":\"Rnd Pitch\",\"type\":\"int\",\"min\":0,\"max\":1,\"step\":1},"
             "{\"key\":\"init_freq\",\"name\":\"Init Freq\",\"type\":\"int\",\"min\":0,\"max\":1,\"step\":1},"
             "{\"key\":\"rnd_pan\",\"name\":\"Rnd Pan\",\"type\":\"int\",\"min\":0,\"max\":1,\"step\":1},"
             "{\"key\":\"all_mono\",\"name\":\"All Mono\",\"type\":\"int\",\"min\":0,\"max\":1,\"step\":1},"
@@ -1639,7 +1841,7 @@ static int get_param(void *instance, const char *key, char *buf, int buf_len) {
     if (strcmp(key, "ui_hierarchy") == 0) {
         static const char *hier =
             "{\"modes\":null,\"levels\":{"
-            "\"root\":{\"name\":\"Weird Drum\","
+            "\"root\":{\"name\":\"Weird Dreams\","
             "\"knobs\":[\"v1_vol\",\"v2_vol\",\"v3_vol\",\"v4_vol\",\"v5_vol\",\"v6_vol\",\"v7_vol\",\"v8_vol\"],"
             "\"params\":[{\"level\":\"Mixer\",\"label\":\"Mixer\"},{\"level\":\"General\",\"label\":\"General\"},{\"level\":\"Patch\",\"label\":\"Patch\"},{\"level\":\"Pan\",\"label\":\"Pan\"},"
             "{\"level\":\"Voice 1\",\"label\":\"Voice 1\"},{\"level\":\"Voice 2\",\"label\":\"Voice 2\"},"
@@ -1653,8 +1855,8 @@ static int get_param(void *instance, const char *key, char *buf, int buf_len) {
             "\"knobs\":[\"comp\",\"dj_filter\",\"eq_lo\",\"lo_freq\",\"eq_mid\",\"mid_freq\",\"eq_hi\",\"hi_freq\"],"
             "\"params\":[\"comp\",\"dj_filter\",\"eq_lo\",\"lo_freq\",\"eq_mid\",\"mid_freq\",\"eq_hi\",\"hi_freq\",\"q_lo\",\"q_mid\",\"q_hi\",\"master\"]},"
             "\"Patch\":{\"label\":\"Patch\","
-            "\"knobs\":[\"kit\",\"rnd_voice\",\"rnd_patch\",\"same_freq\",\"init_freq\",\"rnd_pan\",\"all_mono\"],"
-            "\"params\":[\"kit\",\"rnd_voice\",\"rnd_patch\",\"same_freq\",\"init_freq\",\"rnd_pan\",\"all_mono\"]},"
+            "\"knobs\":[\"kit\",\"rnd_kit\",\"rnd_voice\",\"rnd_pitch\",\"same_freq\",\"init_freq\",\"rnd_pan\",\"all_mono\"],"
+            "\"params\":[\"kit\",\"rnd_kit\",\"rnd_voice\",\"rnd_pitch\",\"same_freq\",\"init_freq\",\"rnd_pan\",\"all_mono\"]},"
             "\"Pan\":{\"label\":\"Pan\","
             "\"knobs\":[\"v1_pan\",\"v2_pan\",\"v3_pan\",\"v4_pan\",\"v5_pan\",\"v6_pan\",\"v7_pan\",\"v8_pan\"],"
             "\"params\":[\"v1_pan\",\"v2_pan\",\"v3_pan\",\"v4_pan\",\"v5_pan\",\"v6_pan\",\"v7_pan\",\"v8_pan\"]},"
@@ -1738,8 +1940,9 @@ static int get_param(void *instance, const char *key, char *buf, int buf_len) {
     if (strcmp(key, "q_mid") == 0) return snprintf(buf, buf_len, "%.4f", inst->master.eq_mid_q);
     if (strcmp(key, "q_hi") == 0) return snprintf(buf, buf_len, "%.4f", inst->master.eq_high_q);
     if (strcmp(key, "kit") == 0) return snprintf(buf, buf_len, "%d", inst->current_kit);
+    if (strcmp(key, "rnd_kit") == 0) return snprintf(buf, buf_len, "0");
     if (strcmp(key, "rnd_voice") == 0) return snprintf(buf, buf_len, "0");
-    if (strcmp(key, "rnd_patch") == 0) return snprintf(buf, buf_len, "0");
+    if (strcmp(key, "rnd_pitch") == 0) return snprintf(buf, buf_len, "0");
     if (strcmp(key, "rnd_pan") == 0) return snprintf(buf, buf_len, "0");
     if (strcmp(key, "init_freq") == 0) return snprintf(buf, buf_len, "0");
     if (strcmp(key, "all_mono") == 0) return snprintf(buf, buf_len, "0");

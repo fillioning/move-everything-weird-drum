@@ -1,6 +1,6 @@
 #!/bin/bash
 set -e
-MODULE_ID="weird-drum"
+MODULE_ID="weird-dreams"
 MOVE_HOST="${1:-${MOVE_HOST:-move.local}}"
 DEST="/data/UserData/move-anything/modules/sound_generators"
 

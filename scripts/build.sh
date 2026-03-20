@@ -1,13 +1,13 @@
 #!/bin/bash
 set -e
-MODULE_ID="weird-drum"
+MODULE_ID="weird-dreams"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-echo "=== Building Weird Drum for Ableton Move (ARM64) ==="
+echo "=== Building Weird Dreams for Ableton Move (ARM64) ==="
 
 # Build Docker image
-docker build -t weird-drum-builder "$SCRIPT_DIR"
+docker build -t weird-dreams-builder "$SCRIPT_DIR"
 
 # Clean and create output directory
 rm -rf "$ROOT/dist/$MODULE_ID"
@@ -16,13 +16,13 @@ mkdir -p "$ROOT/dist/$MODULE_ID"
 # Cross-compile to ARM64
 MSYS_NO_PATHCONV=1 docker run --rm \
   -v "$ROOT:/build" \
-  weird-drum-builder \
+  weird-dreams-builder \
   sh -c '\
-    dos2unix /build/src/dsp/weird_drum.c 2>/dev/null; \
+    dos2unix /build/src/dsp/weird_dreams.c 2>/dev/null; \
     aarch64-linux-gnu-gcc \
       -O2 -shared -fPIC -ffast-math \
-      -o /build/dist/weird-drum/dsp.so \
-      /build/src/dsp/weird_drum.c \
+      -o /build/dist/weird-dreams/dsp.so \
+      /build/src/dsp/weird_dreams.c \
       -lm'
 
 # Copy module.json
