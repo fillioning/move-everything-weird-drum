@@ -5,24 +5,22 @@ Port of [WeirdDrums](https://github.com/dfilaretti/WeirdDrums) (Daniele Filarett
 ## Features
 
 - **8 independent drum voices**, each with oscillator (continuous sine/tri/saw/square morph), white noise with SVF filter, exponential AD envelopes, pitch modulation, tanh distortion, and clap retrigger
+- **Dynamic pad-selected voice editing** — press a pad to instantly switch knobs and menu to that voice's parameters (Mr Drums-style)
 - **41 voice presets** across 8 categories: Kicks, Snares, Toms, Hi-Hats, Cymbals, Claps, Percussion, FX
 - **64 kit presets**: classic machines (808, 909, LinnDrum, CR-78), genre kits (Techno, House, Trap, DnB, Afrobeat, Footwork...), character kits (Industrial, Lo-Fi, Ambient, Glitch...), and hybrid/specialized kits
 - **96 musical pitch scales** (Rnd Pitch): 8 scale types (Major, Minor, Pentatonic, Blues, Modes, Harmonic/Melodic minor, Exotic) x 12 root notes, with per-voice frequency ranges tuned to real hardware drum synth standards
 - **Master bus FX**: dirty compressor, Isolator3-style DJ filter, Massenburg 8200-inspired 3-band parametric EQ
-- **Per-voice panning** with constant-power law
-- **12 UI pages**: Mixer, General, Patch, Pan, Voice 1-8
+- **Per-voice volume and panning** with constant-power law
 
 ## UI Pages
 
-| Page | Knobs |
-|------|-------|
-| **Mixer** | V1-V8 volume |
-| **General** | Crush, Filter, Lo Gain, Lo Freq, Mid Gain, Mid Freq, Hi Gain, Hi Freq |
-| **Patch** | Kit, Rnd Kit, Rnd Voice, Rnd Pitch, SameFreq, Init Freq, Rnd Pan, All Mono |
-| **Pan** | V1-V8 panning |
-| **Voice 1-8** | Freq, Decay, Wave, P.Env, Mix, Cutoff, Distort, Preset |
+| Page | Knobs | Description |
+|------|-------|-------------|
+| **Patch** | Kit, Rnd Kit, Rnd Voice, Rnd Pitch, SameFreq, Init Freq, Rnd Pan, All Mono | Kit selection and randomization |
+| **General** | Crush, Filter, Lo Gain, Lo Freq, Mid Gain, Mid Freq, Hi Gain, Hi Freq | Master bus FX (+ Q, Reset EQ, Master in menu) |
+| **Voice** | Volume, Pan, Freq, Decay, Wave, Mix, Cutoff, Preset | Dynamic — edits the current pad's voice |
 
-Pressing a pad triggers the voice AND switches to that voice's parameter page.
+Pressing a pad triggers the voice AND switches to that voice's parameters on knobs and menu. The Voice page title shows which voice is selected.
 
 ## MIDI Mapping
 
