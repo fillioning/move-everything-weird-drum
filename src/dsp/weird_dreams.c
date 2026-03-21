@@ -2,7 +2,7 @@
  * Weird Dreams — 8-voice analog drum synthesizer for Ableton Move
  * Based on WeirdDrums by Daniele Filaretti (MIT)
  * https://github.com/dfilaretti/WeirdDrums
- * Ported and expanded for Move Everything by Vincent Fillion
+ * Ported and expanded for Schwung by Vincent Fillion
  *
  * Architecture: 8 independent drum voices, each with:
  *   - Phase-accumulator oscillator (sine/saw/square)
