@@ -2,7 +2,7 @@
     "id": "weird-dreams",
     "name": "Weird Dreams",
     "abbrev": "WDRM",
-    "version": "0.2.0",
+    "version": "0.2.1",
     "api_version": 2,
     "description": "8-voice analog drum machine with 64 kits, 41 voice presets, 96 musical pitch scales, master bus FX, and dynamic pad-selected voice editing",
     "author": "Vincent Fillion (DSP: Daniele Filaretti, MIT)",
@@ -17,7 +17,9 @@
         "comp": 0.0, "dj_filter": 0.5,
         "eq_lo": 0.0, "eq_mid": 0.0, "eq_hi": 0.0,
         "lo_freq": 200.0, "mid_freq": 1000.0,
-        "master": 0.8
+        "master": 0.8,
+        "rev_mix": 0.0, "rev_type": 0, "rev_size": 0.5, "rev_decay": 0.5,
+        "dly_mix": 0.0, "dly_rate": 0.3, "dly_fdbk": 0.3, "dly_tone": 0.5
     },
 
     "capabilities": {
@@ -34,7 +36,8 @@
                     "params": [
                         {"level": "Patch", "label": "Patch"},
                         {"level": "General", "label": "General"},
-                        {"level": "Voice", "label": "Voice"}
+                        {"level": "Voice", "label": "Voice"},
+                        {"level": "FX", "label": "FX"}
                     ]
                 },
                 "Patch": {
@@ -50,7 +53,12 @@
                 "Voice": {
                     "label": "Voice",
                     "knobs": ["cv_vol", "cv_pan", "cv_freq", "cv_decay", "cv_wave", "cv_mix", "cv_cutoff", "cv_preset"],
-                    "params": ["cv_vol", "cv_pan", "cv_freq", "cv_attack", "cv_decay", "cv_wave", "cv_penv", "cv_prate", "cv_lamt", "cv_lrate", "cv_ftype", "cv_cutoff", "cv_fres", "cv_nattack", "cv_ndecay", "cv_mix", "cv_dist", "cv_level", "cv_preset"]
+                    "params": ["cv_vol", "cv_pan", "cv_freq", "cv_attack", "cv_decay", "cv_wave", "cv_penv", "cv_prate", "cv_lamt", "cv_lrate", "cv_ftype", "cv_cutoff", "cv_fres", "cv_nattack", "cv_ndecay", "cv_mix", "cv_dist", "cv_level", "cv_preset", "cv_rsend", "cv_dsend"]
+                },
+                "FX": {
+                    "label": "FX",
+                    "knobs": ["rev_mix", "rev_type", "rev_size", "rev_decay", "dly_mix", "dly_rate", "dly_fdbk", "dly_tone"],
+                    "params": ["rev_mix", "rev_type", "rev_size", "rev_decay", "dly_mix", "dly_rate", "dly_fdbk", "dly_tone"]
                 }
             }
         }

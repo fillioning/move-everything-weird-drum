@@ -2,7 +2,7 @@
  * Weird Dreams — 8-voice analog drum synthesizer for Ableton Move
  * Based on WeirdDrums by Daniele Filaretti (MIT)
  * https://github.com/dfilaretti/WeirdDrums
- * Ported and expanded for Move Everything by Vincent Fillion
+ * Ported and expanded for Schwung by Vincent Fillion
  *
  * Architecture: 8 independent drum voices, each with:
  *   - Phase-accumulator oscillator (sine/saw/square)
@@ -13,8 +13,8 @@
  *   - tanh distortion
  *   - Per-voice level
  *
- * Master bus: compressor, distortion, 3-band EQ
- * UI: Patch page, General page, dynamic Voice page (pad-selected)
+ * Master bus: compressor, distortion, 3-band EQ, reverb, delay
+ * UI: Patch page, General page, dynamic Voice page, FX page
  * ============================================================================ */
 
 #include <math.h>
@@ -231,6 +231,8 @@ typedef struct {
     float distortion;       /* 0..50 dB */
     float level;            /* 0..1 linear */
     float pan;              /* -1..+1 (left..right, 0=center) */
+    float reverb_send;      /* 0..1 */
+    float delay_send;       /* 0..1 */
 
     int   preset;
     int   active;           /* voice is sounding */
@@ -249,6 +251,7 @@ typedef struct {
 static void preset_defaults(wd_voice_t *v) {
     v->attack = 0.001f; v->pitch_lfo_amt = 0.0f; v->pitch_lfo_rate = 1.0f;
     v->noise_attack = 0.001f; v->clap_count = 0; v->clap_spacing = 0;
+    v->reverb_send = 0.0f; v->delay_send = 0.0f;
 }
 
 static void voice_apply_preset(wd_voice_t *v, int preset) {
@@ -259,194 +262,234 @@ static void voice_apply_preset(wd_voice_t *v, int preset) {
     case 0: /* Sub Kick — deep 808 sub */
         v->freq=38; v->wave=0.0f; v->decay=0.8f; v->pitch_env_amt=0.95f; v->pitch_env_rate=0.07f;
         v->filter_type=0; v->filter_cutoff=250; v->filter_res=1.2f;
-        v->noise_decay=0.02f; v->mix=0.02f; v->distortion=5; v->level=0.95f; break;
+        v->noise_decay=0.02f; v->mix=0.02f; v->distortion=5; v->level=0.95f;
+        v->reverb_send=0.05f; v->delay_send=0.0f; break;
     case 1: /* Punch Kick — tight 909 */
         v->freq=65; v->wave=0.0f; v->attack=0.0003f; v->decay=0.15f; v->pitch_env_amt=0.75f; v->pitch_env_rate=0.02f;
         v->filter_type=0; v->filter_cutoff=600; v->filter_res=1.5f;
-        v->noise_decay=0.015f; v->mix=0.1f; v->distortion=14; v->level=0.9f; break;
+        v->noise_decay=0.015f; v->mix=0.1f; v->distortion=14; v->level=0.9f;
+        v->reverb_send=0.07f; v->delay_send=0.0f; break;
     case 2: /* FM Kick — saw sweep, Microtonic */
         v->freq=48; v->wave=0.66f; v->attack=0.0001f; v->decay=0.35f; v->pitch_env_amt=1.0f; v->pitch_env_rate=0.04f;
         v->pitch_lfo_amt=0.03f; v->pitch_lfo_rate=8;
         v->filter_type=0; v->filter_cutoff=800; v->filter_res=2.0f;
-        v->noise_decay=0.04f; v->mix=0.08f; v->distortion=20; v->level=0.85f; break;
+        v->noise_decay=0.04f; v->mix=0.08f; v->distortion=20; v->level=0.85f;
+        v->reverb_send=0.08f; v->delay_send=0.0f; break;
     case 3: /* Dusty Kick — lo-fi saturated */
         v->freq=50; v->wave=0.15f; v->decay=0.2f; v->pitch_env_amt=0.6f; v->pitch_env_rate=0.025f;
         v->filter_type=0; v->filter_cutoff=500; v->filter_res=1.3f;
-        v->noise_decay=0.06f; v->mix=0.12f; v->distortion=25; v->level=0.85f; break;
+        v->noise_decay=0.06f; v->mix=0.12f; v->distortion=25; v->level=0.85f;
+        v->reverb_send=0.1f; v->delay_send=0.0f; break;
     case 4: /* Long Kick — boomy tail */
         v->freq=42; v->wave=0.0f; v->decay=1.2f; v->pitch_env_amt=0.85f; v->pitch_env_rate=0.08f;
         v->filter_type=0; v->filter_cutoff=350; v->filter_res=1.0f;
-        v->noise_decay=0.03f; v->mix=0.03f; v->distortion=3; v->level=0.9f; break;
+        v->noise_decay=0.03f; v->mix=0.03f; v->distortion=3; v->level=0.9f;
+        v->reverb_send=0.06f; v->delay_send=0.0f; break;
 
     /* ── SNARES (5-9) ── */
     case 5: /* Snare — classic analog */
         v->freq=190; v->wave=0.0f; v->attack=0.0005f; v->decay=0.16f; v->pitch_env_amt=0.35f; v->pitch_env_rate=0.025f;
         v->filter_type=2; v->filter_cutoff=3500; v->filter_res=1.4f;
-        v->noise_decay=0.16f; v->mix=0.6f; v->distortion=4; v->level=0.8f; break;
+        v->noise_decay=0.16f; v->mix=0.6f; v->distortion=4; v->level=0.8f;
+        v->reverb_send=0.2f; v->delay_send=0.05f; break;
     case 6: /* Snap Snare — crispy 909 */
         v->freq=220; v->wave=0.0f; v->attack=0.0003f; v->decay=0.1f; v->pitch_env_amt=0.4f; v->pitch_env_rate=0.015f;
         v->filter_type=1; v->filter_cutoff=4000; v->filter_res=1.8f;
-        v->noise_attack=0.0003f; v->noise_decay=0.12f; v->mix=0.7f; v->distortion=6; v->level=0.75f; break;
+        v->noise_attack=0.0003f; v->noise_decay=0.12f; v->mix=0.7f; v->distortion=6; v->level=0.75f;
+        v->reverb_send=0.15f; v->delay_send=0.07f; break;
     case 7: /* Fat Snare — thick body */
         v->freq=150; v->wave=0.15f; v->decay=0.25f; v->pitch_env_amt=0.2f; v->pitch_env_rate=0.04f;
         v->filter_type=0; v->filter_cutoff=2000; v->filter_res=1.0f;
-        v->noise_decay=0.2f; v->mix=0.45f; v->distortion=5; v->level=0.85f; break;
+        v->noise_decay=0.2f; v->mix=0.45f; v->distortion=5; v->level=0.85f;
+        v->reverb_send=0.25f; v->delay_send=0.08f; break;
     case 8: /* Crack Snare — harsh transient */
         v->freq=350; v->wave=1.0f; v->attack=0.0001f; v->decay=0.06f; v->pitch_env_amt=0.5f; v->pitch_env_rate=0.008f;
         v->filter_type=2; v->filter_cutoff=5000; v->filter_res=3.5f;
-        v->noise_attack=0.0001f; v->noise_decay=0.08f; v->mix=0.75f; v->distortion=16; v->level=0.7f; break;
+        v->noise_attack=0.0001f; v->noise_decay=0.08f; v->mix=0.75f; v->distortion=16; v->level=0.7f;
+        v->reverb_send=0.3f; v->delay_send=0.1f; break;
     case 9: /* Noise Snare — pure noise */
         v->freq=300; v->wave=1.0f; v->attack=0.0001f; v->decay=0.12f; v->pitch_env_amt=0.0f; v->pitch_env_rate=0.01f;
         v->filter_type=2; v->filter_cutoff=4500; v->filter_res=1.2f;
-        v->noise_attack=0.0001f; v->noise_decay=0.15f; v->mix=0.95f; v->distortion=2; v->level=0.7f; break;
+        v->noise_attack=0.0001f; v->noise_decay=0.15f; v->mix=0.95f; v->distortion=2; v->level=0.7f;
+        v->reverb_send=0.18f; v->delay_send=0.06f; break;
 
     /* ── TOMS (10-14) ── */
     case 10: /* Low Tom */
         v->freq=75; v->wave=0.0f; v->decay=0.4f; v->pitch_env_amt=0.55f; v->pitch_env_rate=0.045f;
         v->filter_type=0; v->filter_cutoff=700; v->filter_res=1.0f;
-        v->noise_decay=0.08f; v->mix=0.1f; v->distortion=3; v->level=0.8f; break;
+        v->noise_decay=0.08f; v->mix=0.1f; v->distortion=3; v->level=0.8f;
+        v->reverb_send=0.25f; v->delay_send=0.0f; break;
     case 11: /* Mid Tom */
         v->freq=130; v->wave=0.0f; v->decay=0.3f; v->pitch_env_amt=0.45f; v->pitch_env_rate=0.035f;
         v->filter_type=0; v->filter_cutoff=900; v->filter_res=1.0f;
-        v->noise_decay=0.06f; v->mix=0.08f; v->distortion=2; v->level=0.8f; break;
+        v->noise_decay=0.06f; v->mix=0.08f; v->distortion=2; v->level=0.8f;
+        v->reverb_send=0.22f; v->delay_send=0.03f; break;
     case 12: /* High Tom */
         v->freq=200; v->wave=0.0f; v->decay=0.22f; v->pitch_env_amt=0.4f; v->pitch_env_rate=0.03f;
         v->filter_type=0; v->filter_cutoff=1200; v->filter_res=1.0f;
-        v->noise_decay=0.05f; v->mix=0.08f; v->distortion=2; v->level=0.75f; break;
+        v->noise_decay=0.05f; v->mix=0.08f; v->distortion=2; v->level=0.75f;
+        v->reverb_send=0.2f; v->delay_send=0.04f; break;
     case 13: /* Acid Tom — resonant filter sweep */
         v->freq=110; v->wave=0.66f; v->decay=0.35f; v->pitch_env_amt=0.7f; v->pitch_env_rate=0.06f;
         v->filter_type=0; v->filter_cutoff=1800; v->filter_res=3.8f;
-        v->noise_decay=0.05f; v->mix=0.05f; v->distortion=10; v->level=0.75f; break;
+        v->noise_decay=0.05f; v->mix=0.05f; v->distortion=10; v->level=0.75f;
+        v->reverb_send=0.28f; v->delay_send=0.05f; break;
     case 14: /* Conga — long resonant body */
         v->freq=240; v->wave=0.0f; v->attack=0.0005f; v->decay=0.5f; v->pitch_env_amt=0.25f; v->pitch_env_rate=0.02f;
         v->filter_type=2; v->filter_cutoff=1200; v->filter_res=2.5f;
-        v->noise_attack=0.0005f; v->noise_decay=0.06f; v->mix=0.15f; v->distortion=6; v->level=0.7f; break;
+        v->noise_attack=0.0005f; v->noise_decay=0.06f; v->mix=0.15f; v->distortion=6; v->level=0.7f;
+        v->reverb_send=0.3f; v->delay_send=0.02f; break;
 
     /* ── HI-HATS (15-19) ── */
     case 15: /* Closed HH — tight */
         v->freq=450; v->wave=1.0f; v->attack=0.0001f; v->decay=0.035f; v->pitch_env_amt=0.0f; v->pitch_env_rate=0.01f;
         v->pitch_lfo_amt=0.04f; v->pitch_lfo_rate=60;
         v->filter_type=1; v->filter_cutoff=9000; v->filter_res=2.0f;
-        v->noise_attack=0.0001f; v->noise_decay=0.035f; v->mix=0.92f; v->distortion=3; v->level=0.55f; break;
+        v->noise_attack=0.0001f; v->noise_decay=0.035f; v->mix=0.92f; v->distortion=3; v->level=0.55f;
+        v->reverb_send=0.1f; v->delay_send=0.0f; break;
     case 16: /* Open HH — sizzle */
         v->freq=420; v->wave=1.0f; v->attack=0.0001f; v->decay=0.35f; v->pitch_env_amt=0.0f; v->pitch_env_rate=0.01f;
         v->pitch_lfo_amt=0.06f; v->pitch_lfo_rate=40;
         v->filter_type=1; v->filter_cutoff=6500; v->filter_res=1.8f;
-        v->noise_attack=0.0001f; v->noise_decay=0.35f; v->mix=0.93f; v->distortion=2; v->level=0.5f; break;
+        v->noise_attack=0.0001f; v->noise_decay=0.35f; v->mix=0.93f; v->distortion=2; v->level=0.5f;
+        v->reverb_send=0.15f; v->delay_send=0.05f; break;
     case 17: /* Pedal HH — medium */
         v->freq=380; v->wave=1.0f; v->attack=0.0001f; v->decay=0.1f; v->pitch_env_amt=0.0f; v->pitch_env_rate=0.01f;
         v->pitch_lfo_amt=0.03f; v->pitch_lfo_rate=50;
         v->filter_type=1; v->filter_cutoff=7000; v->filter_res=1.5f;
-        v->noise_attack=0.0001f; v->noise_decay=0.1f; v->mix=0.9f; v->distortion=1; v->level=0.5f; break;
+        v->noise_attack=0.0001f; v->noise_decay=0.1f; v->mix=0.9f; v->distortion=1; v->level=0.5f;
+        v->reverb_send=0.12f; v->delay_send=0.02f; break;
     case 18: /* Metallic HH — LXR-02 */
         v->freq=500; v->wave=1.0f; v->attack=0.0001f; v->decay=0.05f; v->pitch_env_amt=0.05f; v->pitch_env_rate=0.005f;
         v->pitch_lfo_amt=0.1f; v->pitch_lfo_rate=75;
         v->filter_type=2; v->filter_cutoff=8000; v->filter_res=3.0f;
-        v->noise_attack=0.0001f; v->noise_decay=0.05f; v->mix=0.85f; v->distortion=8; v->level=0.55f; break;
+        v->noise_attack=0.0001f; v->noise_decay=0.05f; v->mix=0.85f; v->distortion=8; v->level=0.55f;
+        v->reverb_send=0.13f; v->delay_send=0.03f; break;
     case 19: /* Trashy HH — dirty, distorted */
         v->freq=550; v->wave=0.8f; v->attack=0.0001f; v->decay=0.08f; v->pitch_env_amt=0.0f; v->pitch_env_rate=0.01f;
         v->pitch_lfo_amt=0.15f; v->pitch_lfo_rate=65;
         v->filter_type=1; v->filter_cutoff=5000; v->filter_res=2.5f;
-        v->noise_attack=0.0001f; v->noise_decay=0.08f; v->mix=0.88f; v->distortion=18; v->level=0.5f; break;
+        v->noise_attack=0.0001f; v->noise_decay=0.08f; v->mix=0.88f; v->distortion=18; v->level=0.5f;
+        v->reverb_send=0.11f; v->delay_send=0.04f; break;
 
     /* ── CYMBALS (20-24) ── */
     case 20: /* Crash — bright */
         v->freq=280; v->wave=1.0f; v->attack=0.002f; v->decay=1.2f; v->pitch_env_amt=0.0f; v->pitch_env_rate=0.01f;
         v->pitch_lfo_amt=0.07f; v->pitch_lfo_rate=4;
         v->filter_type=1; v->filter_cutoff=4500; v->filter_res=1.2f;
-        v->noise_attack=0.002f; v->noise_decay=1.2f; v->mix=0.88f; v->distortion=0; v->level=0.45f; break;
+        v->noise_attack=0.002f; v->noise_decay=1.2f; v->mix=0.88f; v->distortion=0; v->level=0.45f;
+        v->reverb_send=0.35f; v->delay_send=0.0f; break;
     case 21: /* Ride — bell character */
         v->freq=600; v->wave=1.0f; v->attack=0.0001f; v->decay=0.8f; v->pitch_env_amt=0.04f; v->pitch_env_rate=0.005f;
         v->pitch_lfo_amt=0.03f; v->pitch_lfo_rate=6;
         v->filter_type=2; v->filter_cutoff=5500; v->filter_res=2.0f;
-        v->noise_attack=0.0001f; v->noise_decay=0.6f; v->mix=0.7f; v->distortion=4; v->level=0.5f; break;
+        v->noise_attack=0.0001f; v->noise_decay=0.6f; v->mix=0.7f; v->distortion=4; v->level=0.5f;
+        v->reverb_send=0.3f; v->delay_send=0.0f; break;
     case 22: /* Ride Bell — ping */
         v->freq=900; v->wave=1.0f; v->attack=0.0001f; v->decay=0.5f; v->pitch_env_amt=0.08f; v->pitch_env_rate=0.004f;
         v->filter_type=2; v->filter_cutoff=4000; v->filter_res=3.5f;
-        v->noise_attack=0.0001f; v->noise_decay=0.2f; v->mix=0.4f; v->distortion=8; v->level=0.55f; break;
+        v->noise_attack=0.0001f; v->noise_decay=0.2f; v->mix=0.4f; v->distortion=8; v->level=0.55f;
+        v->reverb_send=0.25f; v->delay_send=0.0f; break;
     case 23: /* Dark Crash — filtered */
         v->freq=250; v->wave=0.85f; v->attack=0.003f; v->decay=1.5f; v->pitch_env_amt=0.0f; v->pitch_env_rate=0.01f;
         v->pitch_lfo_amt=0.05f; v->pitch_lfo_rate=3;
         v->filter_type=0; v->filter_cutoff=3000; v->filter_res=1.0f;
-        v->noise_attack=0.003f; v->noise_decay=1.5f; v->mix=0.85f; v->distortion=0; v->level=0.45f; break;
+        v->noise_attack=0.003f; v->noise_decay=1.5f; v->mix=0.85f; v->distortion=0; v->level=0.45f;
+        v->reverb_send=0.4f; v->delay_send=0.0f; break;
     case 24: /* Sizzle — long shimmer */
         v->freq=350; v->wave=1.0f; v->attack=0.005f; v->decay=2.5f; v->pitch_env_amt=0.0f; v->pitch_env_rate=0.01f;
         v->pitch_lfo_amt=0.1f; v->pitch_lfo_rate=5;
         v->filter_type=1; v->filter_cutoff=6000; v->filter_res=1.5f;
-        v->noise_attack=0.005f; v->noise_decay=2.5f; v->mix=0.9f; v->distortion=0; v->level=0.4f; break;
+        v->noise_attack=0.005f; v->noise_decay=2.5f; v->mix=0.9f; v->distortion=0; v->level=0.4f;
+        v->reverb_send=0.35f; v->delay_send=0.0f; break;
 
     /* ── CLAPS (25-29) — use clap retrigger for flutter ── */
     case 25: /* Clap 808 — classic triple-hit flutter */
         v->freq=800; v->wave=1.0f; v->attack=0.0001f; v->decay=0.2f; v->pitch_env_amt=0.0f; v->pitch_env_rate=0.01f;
         v->filter_type=2; v->filter_cutoff=1800; v->filter_res=1.5f;
         v->noise_attack=0.0001f; v->noise_decay=0.2f; v->mix=0.95f; v->distortion=4; v->level=0.7f;
-        v->clap_count=3; v->clap_spacing=480; break; /* 3 hits, ~11ms apart */
+        v->clap_count=3; v->clap_spacing=480;
+        v->reverb_send=0.4f; v->delay_send=0.15f; break; /* 3 hits, ~11ms apart */
     case 26: /* Tight Clap — fast flutter, short tail */
         v->freq=1000; v->wave=1.0f; v->attack=0.0001f; v->decay=0.1f; v->pitch_env_amt=0.0f; v->pitch_env_rate=0.01f;
         v->filter_type=2; v->filter_cutoff=2500; v->filter_res=1.8f;
         v->noise_attack=0.0001f; v->noise_decay=0.1f; v->mix=0.92f; v->distortion=6; v->level=0.7f;
-        v->clap_count=2; v->clap_spacing=350; break;
+        v->clap_count=2; v->clap_spacing=350;
+        v->reverb_send=0.3f; v->delay_send=0.1f; break;
     case 27: /* Big Clap — wide flutter, long reverby tail */
         v->freq=700; v->wave=1.0f; v->attack=0.0001f; v->decay=0.4f; v->pitch_env_amt=0.0f; v->pitch_env_rate=0.01f;
         v->filter_type=2; v->filter_cutoff=1500; v->filter_res=1.2f;
         v->noise_attack=0.0001f; v->noise_decay=0.4f; v->mix=0.93f; v->distortion=3; v->level=0.65f;
-        v->clap_count=4; v->clap_spacing=550; break; /* 4 hits, wider spacing */
+        v->clap_count=4; v->clap_spacing=550;
+        v->reverb_send=0.5f; v->delay_send=0.2f; break; /* 4 hits, wider spacing */
     case 28: /* Dirty Clap — distorted */
         v->freq=900; v->wave=0.85f; v->attack=0.0001f; v->decay=0.15f; v->pitch_env_amt=0.0f; v->pitch_env_rate=0.01f;
         v->filter_type=2; v->filter_cutoff=2000; v->filter_res=2.0f;
         v->noise_attack=0.0001f; v->noise_decay=0.15f; v->mix=0.9f; v->distortion=18; v->level=0.65f;
-        v->clap_count=3; v->clap_spacing=400; break;
+        v->clap_count=3; v->clap_spacing=400;
+        v->reverb_send=0.35f; v->delay_send=0.12f; break;
     case 29: /* Snap Clap — single hit, no flutter */
         v->freq=1200; v->wave=1.0f; v->attack=0.0001f; v->decay=0.08f; v->pitch_env_amt=0.1f; v->pitch_env_rate=0.005f;
         v->filter_type=1; v->filter_cutoff=3000; v->filter_res=2.5f;
-        v->noise_attack=0.0001f; v->noise_decay=0.08f; v->mix=0.85f; v->distortion=8; v->level=0.7f; break;
+        v->noise_attack=0.0001f; v->noise_decay=0.08f; v->mix=0.85f; v->distortion=8; v->level=0.7f;
+        v->reverb_send=0.35f; v->delay_send=0.15f; break;
 
     /* ── PERCUSSION (30-34) ── */
     case 30: /* Rimshot — sharp click */
         v->freq=500; v->wave=1.0f; v->attack=0.0001f; v->decay=0.035f; v->pitch_env_amt=0.25f; v->pitch_env_rate=0.008f;
         v->filter_type=2; v->filter_cutoff=4000; v->filter_res=2.5f;
-        v->noise_attack=0.0001f; v->noise_decay=0.03f; v->mix=0.4f; v->distortion=8; v->level=0.75f; break;
+        v->noise_attack=0.0001f; v->noise_decay=0.03f; v->mix=0.4f; v->distortion=8; v->level=0.75f;
+        v->reverb_send=0.1f; v->delay_send=0.05f; break;
     case 31: /* Cowbell — metallic ring */
         v->freq=560; v->wave=1.0f; v->attack=0.0001f; v->decay=0.12f; v->pitch_env_amt=0.06f; v->pitch_env_rate=0.004f;
         v->filter_type=2; v->filter_cutoff=2200; v->filter_res=3.5f;
-        v->noise_attack=0.0001f; v->noise_decay=0.03f; v->mix=0.12f; v->distortion=14; v->level=0.65f; break;
+        v->noise_attack=0.0001f; v->noise_decay=0.03f; v->mix=0.12f; v->distortion=14; v->level=0.65f;
+        v->reverb_send=0.15f; v->delay_send=0.1f; break;
     case 32: /* Clave — woody click */
         v->freq=2500; v->wave=0.0f; v->attack=0.0001f; v->decay=0.02f; v->pitch_env_amt=0.15f; v->pitch_env_rate=0.005f;
         v->filter_type=2; v->filter_cutoff=3000; v->filter_res=3.0f;
-        v->noise_attack=0.0001f; v->noise_decay=0.01f; v->mix=0.1f; v->distortion=8; v->level=0.7f; break;
+        v->noise_attack=0.0001f; v->noise_decay=0.01f; v->mix=0.1f; v->distortion=8; v->level=0.7f;
+        v->reverb_send=0.12f; v->delay_send=0.08f; break;
     case 33: /* Shaker — maracas */
         v->freq=600; v->wave=1.0f; v->attack=0.002f; v->decay=0.12f; v->pitch_env_amt=0.0f; v->pitch_env_rate=0.01f;
         v->filter_type=1; v->filter_cutoff=5000; v->filter_res=1.0f;
-        v->noise_attack=0.002f; v->noise_decay=0.12f; v->mix=0.85f; v->distortion=0; v->level=0.5f; break;
+        v->noise_attack=0.002f; v->noise_decay=0.12f; v->mix=0.85f; v->distortion=0; v->level=0.5f;
+        v->reverb_send=0.18f; v->delay_send=0.15f; break;
     case 34: /* Tamb — tambourine */
         v->freq=700; v->wave=1.0f; v->attack=0.0001f; v->decay=0.2f; v->pitch_env_amt=0.0f; v->pitch_env_rate=0.01f;
         v->pitch_lfo_amt=0.08f; v->pitch_lfo_rate=50;
         v->filter_type=1; v->filter_cutoff=7000; v->filter_res=2.0f;
-        v->noise_attack=0.0001f; v->noise_decay=0.2f; v->mix=0.9f; v->distortion=2; v->level=0.5f; break;
+        v->noise_attack=0.0001f; v->noise_decay=0.2f; v->mix=0.9f; v->distortion=2; v->level=0.5f;
+        v->reverb_send=0.2f; v->delay_send=0.12f; break;
 
     /* ── FX (35-39) ── */
     case 35: /* Zap — laser sweep */
         v->freq=1200; v->wave=0.66f; v->attack=0.0001f; v->decay=0.1f; v->pitch_env_amt=1.0f; v->pitch_env_rate=0.1f;
         v->filter_type=0; v->filter_cutoff=8000; v->filter_res=2.5f;
-        v->noise_attack=0.0001f; v->noise_decay=0.01f; v->mix=0.03f; v->distortion=18; v->level=0.7f; break;
+        v->noise_attack=0.0001f; v->noise_decay=0.01f; v->mix=0.03f; v->distortion=18; v->level=0.7f;
+        v->reverb_send=0.2f; v->delay_send=0.25f; break;
     case 36: /* Glitch — fast LFO chaos */
         v->freq=320; v->wave=1.0f; v->attack=0.0001f; v->decay=0.07f; v->pitch_env_amt=0.4f; v->pitch_env_rate=0.015f;
         v->pitch_lfo_amt=0.3f; v->pitch_lfo_rate=70;
         v->filter_type=2; v->filter_cutoff=3000; v->filter_res=3.0f;
-        v->noise_attack=0.0001f; v->noise_decay=0.07f; v->mix=0.5f; v->distortion=22; v->level=0.6f; break;
+        v->noise_attack=0.0001f; v->noise_decay=0.07f; v->mix=0.5f; v->distortion=22; v->level=0.6f;
+        v->reverb_send=0.3f; v->delay_send=0.2f; break;
     case 37: /* Drone Hit — long throb */
         v->freq=60; v->wave=0.66f; v->attack=0.01f; v->decay=2.0f; v->pitch_env_amt=0.15f; v->pitch_env_rate=0.15f;
         v->pitch_lfo_amt=0.12f; v->pitch_lfo_rate=3.5f;
         v->filter_type=0; v->filter_cutoff=1500; v->filter_res=3.0f;
-        v->noise_attack=0.01f; v->noise_decay=0.5f; v->mix=0.25f; v->distortion=8; v->level=0.65f; break;
+        v->noise_attack=0.01f; v->noise_decay=0.5f; v->mix=0.25f; v->distortion=8; v->level=0.65f;
+        v->reverb_send=0.4f; v->delay_send=0.3f; break;
     case 38: /* Blip — short tonal ping */
         v->freq=1800; v->wave=0.0f; v->attack=0.0001f; v->decay=0.025f; v->pitch_env_amt=0.6f; v->pitch_env_rate=0.008f;
         v->filter_type=2; v->filter_cutoff=5000; v->filter_res=3.5f;
-        v->noise_attack=0.0001f; v->noise_decay=0.01f; v->mix=0.05f; v->distortion=10; v->level=0.6f; break;
+        v->noise_attack=0.0001f; v->noise_decay=0.01f; v->mix=0.05f; v->distortion=10; v->level=0.6f;
+        v->reverb_send=0.25f; v->delay_send=0.15f; break;
     case 39: /* Noise Burst — white noise hit */
         v->freq=200; v->wave=1.0f; v->attack=0.0001f; v->decay=0.06f; v->pitch_env_amt=0.0f; v->pitch_env_rate=0.01f;
         v->filter_type=2; v->filter_cutoff=4000; v->filter_res=1.0f;
-        v->noise_attack=0.0001f; v->noise_decay=0.06f; v->mix=1.0f; v->distortion=2; v->level=0.6f; break;
+        v->noise_attack=0.0001f; v->noise_decay=0.06f; v->mix=1.0f; v->distortion=2; v->level=0.6f;
+        v->reverb_send=0.35f; v->delay_send=0.2f; break;
 
     default: /* 40 = Custom — no change */ break;
     }
@@ -722,21 +765,26 @@ static float master_process(wd_master_t *m, float in) {
         /* Compression: lower threshold + higher ratio as amount increases */
         float threshold = 0.6f - m->comp_amount * 0.4f;  /* 0.6 → 0.2 */
         float ratio = 1.0f + m->comp_amount * 4.0f;      /* 1:1 → 5:1 */
+        float gain = 1.0f;
         if (m->comp_env > threshold) {
             float over = m->comp_env - threshold;
             float target_over = over / ratio;
-            float gain = (threshold + target_over) / (threshold + over);
+            gain = (threshold + target_over) / (threshold + over);
             out *= gain;
         }
 
-        /* Makeup gain: auto-compensate for gain reduction */
-        float makeup = 1.0f + m->comp_amount * 0.4f;
-        out *= makeup;
+        /* Volume-loss compensation: restore only what compression removed */
+        if (gain < 1.0f) {
+            float compensation = 1.0f / fmaxf(gain, 0.1f);  /* invert gain reduction */
+            compensation = fminf(compensation, 3.0f);         /* cap at +9.5 dB */
+            float blend = 0.5f * m->comp_amount;              /* partial restore: 0-50% */
+            out *= 1.0f + (compensation - 1.0f) * blend;
+        }
 
         /* Above 50%: add saturation that gets progressively filthier */
         if (m->comp_amount > 0.5f) {
             float dirt = (m->comp_amount - 0.5f) * 2.0f;  /* 0..1 over 50-100% */
-            float drive = 1.0f + dirt * dirt * 8.0f;       /* 1x → 9x, quadratic */
+            float drive = 1.0f + dirt * dirt * 4.0f;       /* 1x → 5x, quadratic */
             float wet = tanhf(out * drive);
             /* Crossfade: progressively more saturated signal */
             out = out * (1.0f - dirt) + wet * dirt;
@@ -768,6 +816,219 @@ static float master_process(wd_master_t *m, float in) {
     out *= m->master_level;
 
     return out;
+}
+
+/* ── Reverb (Schroeder network: 4 comb + 2 allpass) ── */
+#define REV_MAX_COMB    2048
+#define REV_MAX_AP      512
+
+typedef struct {
+    float buf[REV_MAX_COMB];
+    int   len;
+    int   idx;
+    float feedback;
+    float damp;         /* one-pole LPF state in feedback */
+    float damp_state;
+} wd_comb_t;
+
+static float comb_process(wd_comb_t *c, float in) {
+    int len = c->len;
+    if (len < 1) return in;
+    if (c->idx >= len) c->idx = 0;
+    float out = c->buf[c->idx];
+    c->damp_state = out * (1.0f - c->damp) + c->damp_state * c->damp;
+    c->buf[c->idx] = in + c->damp_state * c->feedback;
+    c->idx = (c->idx + 1) % len;
+    return out;
+}
+
+typedef struct {
+    float buf[REV_MAX_AP];
+    int   len;
+    int   idx;
+    float feedback;
+} wd_allpass_t;
+
+static float allpass_process(wd_allpass_t *a, float in) {
+    int len = a->len;
+    if (len < 1) return in;
+    if (a->idx >= len) a->idx = 0;
+    float buf_out = a->buf[a->idx];
+    float out = buf_out - in;
+    a->buf[a->idx] = in + buf_out * a->feedback;
+    a->idx = (a->idx + 1) % len;
+    return out;
+}
+
+/* Reverb types: 0=Club, 1=Garage, 2=Studio */
+#define REV_NUM_TYPES 3
+static const char *REV_TYPE_NAMES[REV_NUM_TYPES] = { "Club", "Garage", "Studio" };
+
+typedef struct {
+    wd_comb_t    comb[8];    /* 0-3 = left, 4-7 = right */
+    wd_allpass_t ap[4];      /* 0-1 = left, 2-3 = right */
+    float        mix;        /* 0..1 dry/wet */
+    int          type;       /* 0=Club, 1=Garage, 2=Studio */
+    float        size;       /* 0..1 room size */
+    float        decay;      /* 0..1 decay time */
+    float        input_lpf;  /* pre-filter state */
+} wd_reverb_t;
+
+/* Comb delay lengths per type (in samples at 44100Hz) — prime-ish for diffusion
+ * 8 combs: first 4 for left channel, next 4 for right (different primes for decorrelation) */
+static const int COMB_LENS[REV_NUM_TYPES][8] = {
+    { 557, 709, 877, 1013,   601, 743, 911, 1049 },    /* Club */
+    { 1117, 1277, 1499, 1657, 1153, 1319, 1531, 1693 }, /* Garage */
+    { 811, 991, 1151, 1327,  853, 1031, 1187, 1361 }    /* Studio */
+};
+static const int AP_LENS[REV_NUM_TYPES][4] = {
+    { 131, 199, 139, 211 },   /* Club */
+    { 211, 307, 227, 317 },   /* Garage */
+    { 173, 257, 181, 269 }    /* Studio */
+};
+/* Damping per type: Club=bright reflective, Garage=mid metallic, Studio=warm smooth */
+static const float TYPE_DAMP[REV_NUM_TYPES] = { 0.2f, 0.4f, 0.65f };
+/* Feedback base per type: Club=short, Garage=long, Studio=medium-long */
+static const float TYPE_FB_BASE[REV_NUM_TYPES] = { 0.7f, 0.82f, 0.78f };
+
+static void reverb_init(wd_reverb_t *r) {
+    memset(r, 0, sizeof(*r));
+    r->mix = 0.0f;
+    r->type = 0;
+    r->size = 0.5f;
+    r->decay = 0.5f;
+}
+
+static void reverb_set_type(wd_reverb_t *r, int type) {
+    if (type < 0 || type >= REV_NUM_TYPES) type = 0;
+    r->type = type;
+    for (int i = 0; i < 8; i++) {
+        int len = (int)(COMB_LENS[type][i] * (0.5f + r->size * 0.8f));
+        if (len < 1) len = 1;
+        if (len > REV_MAX_COMB) len = REV_MAX_COMB;
+        r->comb[i].idx = 0;
+        r->comb[i].len = len;
+        r->comb[i].damp_state = 0.0f;
+    }
+    for (int i = 0; i < 4; i++) {
+        int len = (int)(AP_LENS[type][i] * (0.5f + r->size * 0.8f));
+        if (len < 1) len = 1;
+        if (len > REV_MAX_AP) len = REV_MAX_AP;
+        r->ap[i].idx = 0;
+        r->ap[i].len = len;
+        r->ap[i].feedback = 0.5f;
+    }
+}
+
+static void reverb_update_params(wd_reverb_t *r) {
+    int type = r->type;
+    float fb = TYPE_FB_BASE[type] + r->decay * (0.98f - TYPE_FB_BASE[type]);
+    float damp = TYPE_DAMP[type] * (1.0f - r->decay * 0.3f);
+    for (int i = 0; i < 8; i++) {
+        r->comb[i].feedback = fb;
+        r->comb[i].damp = damp;
+    }
+}
+
+static void reverb_process_stereo(wd_reverb_t *r, float in, float *out_l, float *out_r) {
+    /* Pre-filter: gentle LPF to tame harshness */
+    r->input_lpf += 0.4f * (in - r->input_lpf);
+    float filtered = r->input_lpf;
+
+    /* Left channel: combs 0-3 + allpass 0-1 */
+    float sum_l = 0.0f;
+    for (int i = 0; i < 4; i++)
+        sum_l += comb_process(&r->comb[i], filtered);
+    sum_l *= 0.25f;
+    sum_l = allpass_process(&r->ap[0], sum_l);
+    sum_l = allpass_process(&r->ap[1], sum_l);
+
+    /* Right channel: combs 4-7 + allpass 2-3 (different primes = decorrelated) */
+    float sum_r = 0.0f;
+    for (int i = 4; i < 8; i++)
+        sum_r += comb_process(&r->comb[i], filtered);
+    sum_r *= 0.25f;
+    sum_r = allpass_process(&r->ap[2], sum_r);
+    sum_r = allpass_process(&r->ap[3], sum_r);
+
+    *out_l = sum_l;
+    *out_r = sum_r;
+}
+
+/* ── Delay (stereo ping-pong with tone filter) ── */
+#define DLY_MAX_SAMPLES 44100  /* 1 second max per channel */
+
+typedef struct {
+    float buf_l[DLY_MAX_SAMPLES];
+    float buf_r[DLY_MAX_SAMPLES];
+    int   write_idx;
+    float mix;          /* 0..1 dry/wet */
+    float rate;         /* 0..1 -> 10ms..1000ms */
+    float feedback;     /* 0..1 */
+    float tone;         /* 0..1 (0=dark, 0.5=clean, 1=bright) */
+    float lp_state_l;   /* feedback LPF state L */
+    float hp_state_l;   /* feedback HPF state L */
+    float lp_state_r;   /* feedback LPF state R */
+    float hp_state_r;   /* feedback HPF state R */
+    float smooth_time;  /* smoothed delay time in samples */
+} wd_delay_t;
+
+static void delay_init(wd_delay_t *d) {
+    memset(d, 0, sizeof(*d));
+    d->mix = 0.0f;
+    d->rate = 0.3f;     /* ~300ms default */
+    d->feedback = 0.3f;
+    d->tone = 0.5f;     /* clean default */
+}
+
+static float delay_read(float *buf, int write_idx, float smooth_time) {
+    float read_pos = (float)write_idx - smooth_time;
+    if (read_pos < 0) read_pos += DLY_MAX_SAMPLES;
+    int idx0 = (int)read_pos;
+    float frac = read_pos - idx0;
+    int idx1 = (idx0 + 1) % DLY_MAX_SAMPLES;
+    idx0 = idx0 % DLY_MAX_SAMPLES;
+    return buf[idx0] * (1.0f - frac) + buf[idx1] * frac;
+}
+
+static float delay_tone_filter(float signal, float tone, float *lp_state, float *hp_state) {
+    if (tone < 0.48f) {
+        float coeff = 0.05f + tone * 1.5f;
+        *lp_state += coeff * (signal - *lp_state);
+        return *lp_state;
+    } else if (tone > 0.52f) {
+        float coeff = 0.1f + (1.0f - tone) * 1.5f;
+        *hp_state += coeff * (signal - *hp_state);
+        return signal - *hp_state;
+    }
+    return signal;
+}
+
+static void delay_process_stereo(wd_delay_t *d, float in, float *out_l, float *out_r) {
+    /* Rate: exponential 10ms..1000ms */
+    float delay_ms = 10.0f * powf(100.0f, d->rate);
+    float delay_samples = delay_ms * (SAMPLE_RATE / 1000.0f);
+    if (delay_samples >= DLY_MAX_SAMPLES) delay_samples = DLY_MAX_SAMPLES - 1;
+
+    /* Smooth delay time to avoid clicks */
+    d->smooth_time += 0.001f * (delay_samples - d->smooth_time);
+
+    /* Read from both delay lines */
+    float del_l = delay_read(d->buf_l, d->write_idx, d->smooth_time);
+    float del_r = delay_read(d->buf_r, d->write_idx, d->smooth_time);
+
+    /* Tone filter on each feedback path */
+    float fb_l = delay_tone_filter(del_l, d->tone, &d->lp_state_l, &d->hp_state_l);
+    float fb_r = delay_tone_filter(del_r, d->tone, &d->lp_state_r, &d->hp_state_r);
+
+    /* Ping-pong: input goes to L, L feedback crosses to R, R crosses to L */
+    float fb = clampf(d->feedback, 0.0f, 0.95f);
+    d->buf_l[d->write_idx] = in      + fb_r * fb;  /* input + R→L cross */
+    d->buf_r[d->write_idx] = fb_l * fb;             /* L→R cross only */
+    d->write_idx = (d->write_idx + 1) % DLY_MAX_SAMPLES;
+
+    *out_l = del_l;
+    *out_r = del_r;
 }
 
 /* ============================================================================
@@ -878,6 +1139,8 @@ typedef struct {
     float       same_freq;               /* 0=off, >0 = master freq override (20..20000) */
     int         current_pitch_scale;     /* last applied pitch scale index (-1=none) */
     uint32_t    rng_state;               /* RNG for randomize */
+    wd_reverb_t reverb;
+    wd_delay_t  delay;
 } wd_instance_t;
 
 /* Simple RNG for randomize */
@@ -909,6 +1172,8 @@ static void randomize_voice(wd_instance_t *inst, int vi) {
     v->clap_count = inst_random(inst) < 0.2f ? (int)(inst_random(inst) * 4) : 0;
     v->clap_spacing = 300 + (int)(inst_random(inst) * 400);
     v->preset = NUM_PRESETS - 1; /* Custom */
+    v->reverb_send = inst_random(inst) * 0.5f;
+    v->delay_send = inst_random(inst) * 0.3f;
 }
 
 static void randomize_patch(wd_instance_t *inst) {
@@ -1183,6 +1448,11 @@ static void *create_instance(const char *module_dir, const char *json_defaults) 
     inst->current_pitch_scale = -1;
     inst->rng_state = 987654321u;
 
+    reverb_init(&inst->reverb);
+    reverb_set_type(&inst->reverb, 0);
+    reverb_update_params(&inst->reverb);
+    delay_init(&inst->delay);
+
     return inst;
 }
 
@@ -1199,14 +1469,32 @@ static void on_midi(void *instance, const uint8_t *msg, int len, int source) {
     uint8_t note   = msg[1];
     uint8_t vel    = msg[2];
 
-    if (status == 0x90 && vel > 0) {
+    if (status == 0xB0) {
+        /* MIDI CC — per-voice freq and decay from upstream sequencer */
+        uint8_t cc  = msg[1];
+        uint8_t val = msg[2];
+        float norm  = (float)val / 127.0f;  /* 0..1 */
+
+        if (cc >= 70 && cc <= 77) {
+            /* CC 70-77 → voice 0-7 frequency (20..20000 Hz exponential) */
+            int vi = cc - 70;
+            inst->voice[vi].freq = knob_to_freq(norm);
+        } else if (cc >= 80 && cc <= 87) {
+            /* CC 80-87 → voice 0-7 decay (0.0001..4.0 sec exponential) */
+            int vi = cc - 80;
+            inst->voice[vi].decay = knob_to_decay(norm);
+        }
+    } else if (status == 0x90 && vel > 0) {
         /* Note On — map to voice */
         int voice_idx;
         if (note >= MIDI_NOTE_BASE && note < MIDI_NOTE_BASE + NUM_VOICES) {
-            /* Fixed mapping: C2=voice0, C#2=voice1, ... G#2=voice7 */
+            /* Lower pads: C2=voice0, C#2=voice1, ... G#2=voice7 */
             voice_idx = note - MIDI_NOTE_BASE;
+        } else if (note >= MIDI_NOTE_BASE + NUM_VOICES && note < MIDI_NOTE_BASE + NUM_VOICES * 2) {
+            /* Upper pads mirror lower: notes 44-51 → voices 0-7 */
+            voice_idx = note - MIDI_NOTE_BASE - NUM_VOICES;
         } else {
-            /* Round-robin for other notes */
+            /* Other notes: round-robin */
             voice_idx = inst->midi_voice_cursor;
             inst->midi_voice_cursor = (inst->midi_voice_cursor + 1) % NUM_VOICES;
         }
@@ -1228,6 +1516,7 @@ static void set_param(void *instance, const char *key, const char *val) {
         if (strcmp(val, "Patch") == 0) inst->current_page = 0;
         else if (strcmp(val, "General") == 0) inst->current_page = 1;
         else if (strcmp(val, "Voice") == 0) inst->current_page = 2;
+        else if (strcmp(val, "FX") == 0) inst->current_page = 3;
         return;
     }
 
@@ -1301,6 +1590,29 @@ static void set_param(void *instance, const char *key, const char *val) {
                 case 5: inst->master.eq_mid_freq = clampf(inst->master.eq_mid_freq + delta * 80.0f, 200.0f, 8000.0f); break;
                 case 6: inst->master.eq_high_gain = clampf(inst->master.eq_high_gain + delta * 0.24f, -12.0f, 12.0f); break;
                 case 7: inst->master.eq_high_freq = clampf(inst->master.eq_high_freq + delta * 160.0f, 2000.0f, 18000.0f); break;
+            }
+        } else if (page == 3) {
+            /* FX page */
+            switch (knob) {
+                case 0: inst->reverb.mix = clampf(inst->reverb.mix + delta * 0.01f, 0.0f, 1.0f); break;
+                case 1: {
+                    inst->reverb.type = (inst->reverb.type + (delta > 0 ? 1 : -1) + REV_NUM_TYPES) % REV_NUM_TYPES;
+                    reverb_set_type(&inst->reverb, inst->reverb.type);
+                    reverb_update_params(&inst->reverb);
+                } break;
+                case 2:
+                    inst->reverb.size = clampf(inst->reverb.size + delta * 0.01f, 0.0f, 1.0f);
+                    reverb_set_type(&inst->reverb, inst->reverb.type);
+                    reverb_update_params(&inst->reverb);
+                    break;
+                case 3:
+                    inst->reverb.decay = clampf(inst->reverb.decay + delta * 0.01f, 0.0f, 1.0f);
+                    reverb_update_params(&inst->reverb);
+                    break;
+                case 4: inst->delay.mix = clampf(inst->delay.mix + delta * 0.01f, 0.0f, 1.0f); break;
+                case 5: inst->delay.rate = clampf(inst->delay.rate + delta * 0.01f, 0.0f, 1.0f); break;
+                case 6: inst->delay.feedback = clampf(inst->delay.feedback + delta * 0.01f, 0.0f, 0.95f); break;
+                case 7: inst->delay.tone = clampf(inst->delay.tone + delta * 0.01f, 0.0f, 1.0f); break;
             }
         } else {
             /* Voice page (dynamic): Volume, Pan, Freq, Decay, Wave, Mix, Cutoff, Preset */
@@ -1396,6 +1708,24 @@ static void set_param(void *instance, const char *key, const char *val) {
     if (strcmp(key, "same_freq") == 0) { inst->same_freq = clampf(f, 20.0f, 20000.0f); for (int i=0;i<NUM_VOICES;i++) { inst->voice[i].freq = inst->same_freq; inst->voice[i].filter_cutoff = clampf(inst->same_freq, 20.0f, 18000.0f); } return; }
     if (strcmp(key, "master") == 0) { inst->master.master_level = clampf(f, 0.0f, 1.0f); return; }
 
+    /* FX params */
+    if (strcmp(key, "rev_mix") == 0) { inst->reverb.mix = clampf(f, 0.0f, 1.0f); return; }
+    if (strcmp(key, "rev_type") == 0) {
+        int t = -1;
+        for (int i = 0; i < REV_NUM_TYPES; i++) { if (strcmp(val, REV_TYPE_NAMES[i]) == 0) { t = i; break; } }
+        if (t < 0) t = (int)clampf(f, 0, REV_NUM_TYPES - 1);
+        inst->reverb.type = t;
+        reverb_set_type(&inst->reverb, t);
+        reverb_update_params(&inst->reverb);
+        return;
+    }
+    if (strcmp(key, "rev_size") == 0) { inst->reverb.size = clampf(f, 0.0f, 1.0f); reverb_set_type(&inst->reverb, inst->reverb.type); reverb_update_params(&inst->reverb); return; }
+    if (strcmp(key, "rev_decay") == 0) { inst->reverb.decay = clampf(f, 0.0f, 1.0f); reverb_update_params(&inst->reverb); return; }
+    if (strcmp(key, "dly_mix") == 0) { inst->delay.mix = clampf(f, 0.0f, 1.0f); return; }
+    if (strcmp(key, "dly_rate") == 0) { inst->delay.rate = clampf(f, 0.0f, 1.0f); return; }
+    if (strcmp(key, "dly_fdbk") == 0) { inst->delay.feedback = clampf(f, 0.0f, 0.95f); return; }
+    if (strcmp(key, "dly_tone") == 0) { inst->delay.tone = clampf(f, 0.0f, 1.0f); return; }
+
     /* Per-voice params: v1_freq, v2_decay, etc. */
     for (int i = 0; i < NUM_VOICES; i++) {
         char k[24];
@@ -1461,6 +1791,10 @@ static void set_param(void *instance, const char *key, const char *val) {
         if (strcmp(key, k) == 0) { v->level = clampf(f, 0.0f, 1.0f); return; }
         snprintf(k, sizeof(k), "v%d_pan", i+1);
         if (strcmp(key, k) == 0) { v->pan = clampf(f, -1.0f, 1.0f); return; }
+        snprintf(k, sizeof(k), "v%d_rsend", i+1);
+        if (strcmp(key, k) == 0) { v->reverb_send = clampf(f, 0.0f, 1.0f); return; }
+        snprintf(k, sizeof(k), "v%d_dsend", i+1);
+        if (strcmp(key, k) == 0) { v->delay_send = clampf(f, 0.0f, 1.0f); return; }
     }
 
     /* Virtual cv_* params — redirect to current voice */
@@ -1509,6 +1843,8 @@ static void set_param(void *instance, const char *key, const char *val) {
         if (strcmp(suffix, "ndecay") == 0) { v->noise_decay = clampf(f, 0.0001f, 1.0f); return; }
         if (strcmp(suffix, "dist") == 0) { v->distortion = clampf(f, 0.0f, 50.0f); return; }
         if (strcmp(suffix, "level") == 0) { v->level = clampf(f, 0.0f, 1.0f); return; }
+        if (strcmp(suffix, "rsend") == 0) { v->reverb_send = clampf(f, 0.0f, 1.0f); return; }
+        if (strcmp(suffix, "dsend") == 0) { v->delay_send = clampf(f, 0.0f, 1.0f); return; }
     }
 
     /* State restore (all params in one string) */
@@ -1546,7 +1882,19 @@ static void set_param(void *instance, const char *key, const char *val) {
         NEXT_TOKEN(); inst->master.dj_filter = atof(token);
         NEXT_TOKEN(); inst->master.master_level = atof(token);
 
-        /* Per-voice: preset freq attack decay wave penv prate lamt lrate ftype cutoff fres nattack ndecay mix dist level */
+        /* FX */
+        NEXT_TOKEN(); inst->reverb.mix = atof(token);
+        NEXT_TOKEN(); inst->reverb.type = atoi(token);
+        NEXT_TOKEN(); inst->reverb.size = atof(token);
+        NEXT_TOKEN(); inst->reverb.decay = atof(token);
+        reverb_set_type(&inst->reverb, inst->reverb.type);
+        reverb_update_params(&inst->reverb);
+        NEXT_TOKEN(); inst->delay.mix = atof(token);
+        NEXT_TOKEN(); inst->delay.rate = atof(token);
+        NEXT_TOKEN(); inst->delay.feedback = atof(token);
+        NEXT_TOKEN(); inst->delay.tone = atof(token);
+
+        /* Per-voice: preset freq attack decay wave penv prate lamt lrate ftype cutoff fres nattack ndecay mix dist level pan rsend dsend */
         for (int i = 0; i < NUM_VOICES; i++) {
             wd_voice_t *v = &inst->voice[i];
             NEXT_TOKEN(); v->preset = atoi(token);
@@ -1567,6 +1915,8 @@ static void set_param(void *instance, const char *key, const char *val) {
             NEXT_TOKEN(); v->distortion = atof(token);
             NEXT_TOKEN(); v->level = atof(token);
             NEXT_TOKEN(); v->pan = atof(token);
+            NEXT_TOKEN(); v->reverb_send = atof(token);
+            NEXT_TOKEN(); v->delay_send = atof(token);
         }
         #undef NEXT_TOKEN
         return;
@@ -1593,6 +1943,10 @@ static int get_param(void *instance, const char *key, char *buf, int buf_len) {
             return snprintf(buf, buf_len, "%s", PATCH_N[knob]);
         }
         if (page == 1) return snprintf(buf, buf_len, "%s", GENERAL_KNOB_NAMES[knob]);
+        if (page == 3) {
+            static const char *FX_N[8] = {"Rev Mix","Rev Type","Rev Size","Rev Decay","Dly Mix","Dly Rate","Dly Fdbk","Dly Tone"};
+            return snprintf(buf, buf_len, "%s", FX_N[knob]);
+        }
         /* Voice page (dynamic) — show voice number in name */
         return snprintf(buf, buf_len, "V%d %s", inst->current_voice + 1, VOICE_KNOB_NAMES[knob]);
     }
@@ -1639,6 +1993,26 @@ static int get_param(void *instance, const char *key, char *buf, int buf_len) {
                 case 5: return snprintf(buf, buf_len, "%dHz", (int)inst->master.eq_mid_freq);
                 case 6: return snprintf(buf, buf_len, "%+.0fdB", inst->master.eq_high_gain);
                 case 7: return snprintf(buf, buf_len, "%dHz", (int)inst->master.eq_high_freq);
+            }
+        }
+        if (page == 3) {
+            switch (knob) {
+                case 0: return snprintf(buf, buf_len, "%d%%", (int)(inst->reverb.mix * 100.0f));
+                case 1: return snprintf(buf, buf_len, "%s", REV_TYPE_NAMES[inst->reverb.type]);
+                case 2: return snprintf(buf, buf_len, "%d%%", (int)(inst->reverb.size * 100.0f));
+                case 3: return snprintf(buf, buf_len, "%d%%", (int)(inst->reverb.decay * 100.0f));
+                case 4: return snprintf(buf, buf_len, "%d%%", (int)(inst->delay.mix * 100.0f));
+                case 5: {
+                    float ms = 10.0f * powf(100.0f, inst->delay.rate);
+                    return snprintf(buf, buf_len, "%dms", (int)ms);
+                }
+                case 6: return snprintf(buf, buf_len, "%d%%", (int)(inst->delay.feedback * 100.0f));
+                case 7: {
+                    float t = inst->delay.tone;
+                    if (t < 0.48f) return snprintf(buf, buf_len, "Dark %d%%", (int)((0.5f - t) * 200.0f));
+                    if (t > 0.52f) return snprintf(buf, buf_len, "Brite %d%%", (int)((t - 0.5f) * 200.0f));
+                    return snprintf(buf, buf_len, "Clean");
+                }
             }
         }
         /* Voice page (dynamic) — Volume, Pan, Freq, Decay, Wave, Mix, Cutoff, Preset */
@@ -1867,7 +2241,33 @@ static int get_param(void *instance, const char *key, char *buf, int buf_len) {
             "{\"key\":\"cv_mix\",\"name\":\"Mix\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
             "{\"key\":\"cv_dist\",\"name\":\"Distort\",\"type\":\"float\",\"min\":0,\"max\":50,\"step\":0.5},"
             "{\"key\":\"cv_level\",\"name\":\"Level\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
-            "{\"key\":\"cv_preset\",\"name\":\"Preset\",\"type\":\"int\",\"min\":0,\"max\":40,\"step\":1}"
+            "{\"key\":\"cv_preset\",\"name\":\"Preset\",\"type\":\"int\",\"min\":0,\"max\":40,\"step\":1},"
+            "{\"key\":\"cv_rsend\",\"name\":\"Rev Send\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
+            "{\"key\":\"cv_dsend\",\"name\":\"Dly Send\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
+            "{\"key\":\"rev_mix\",\"name\":\"Rev Mix\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
+            "{\"key\":\"rev_type\",\"name\":\"Rev Type\",\"type\":\"enum\",\"options\":[\"Club\",\"Garage\",\"Studio\"]},"
+            "{\"key\":\"rev_size\",\"name\":\"Rev Size\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
+            "{\"key\":\"rev_decay\",\"name\":\"Rev Decay\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
+            "{\"key\":\"dly_mix\",\"name\":\"Dly Mix\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
+            "{\"key\":\"dly_rate\",\"name\":\"Dly Rate\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
+            "{\"key\":\"dly_fdbk\",\"name\":\"Dly Fdbk\",\"type\":\"float\",\"min\":0,\"max\":0.95,\"step\":0.01},"
+            "{\"key\":\"dly_tone\",\"name\":\"Dly Tone\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
+            "{\"key\":\"v1_rsend\",\"name\":\"V1 Rev Send\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
+            "{\"key\":\"v1_dsend\",\"name\":\"V1 Dly Send\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
+            "{\"key\":\"v2_rsend\",\"name\":\"V2 Rev Send\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
+            "{\"key\":\"v2_dsend\",\"name\":\"V2 Dly Send\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
+            "{\"key\":\"v3_rsend\",\"name\":\"V3 Rev Send\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
+            "{\"key\":\"v3_dsend\",\"name\":\"V3 Dly Send\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
+            "{\"key\":\"v4_rsend\",\"name\":\"V4 Rev Send\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
+            "{\"key\":\"v4_dsend\",\"name\":\"V4 Dly Send\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
+            "{\"key\":\"v5_rsend\",\"name\":\"V5 Rev Send\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
+            "{\"key\":\"v5_dsend\",\"name\":\"V5 Dly Send\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
+            "{\"key\":\"v6_rsend\",\"name\":\"V6 Rev Send\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
+            "{\"key\":\"v6_dsend\",\"name\":\"V6 Dly Send\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
+            "{\"key\":\"v7_rsend\",\"name\":\"V7 Rev Send\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
+            "{\"key\":\"v7_dsend\",\"name\":\"V7 Dly Send\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
+            "{\"key\":\"v8_rsend\",\"name\":\"V8 Rev Send\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
+            "{\"key\":\"v8_dsend\",\"name\":\"V8 Dly Send\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01}"
             "]";
         int len = (int)strlen(cp);
         if (len >= buf_len) return -1;
@@ -1881,7 +2281,7 @@ static int get_param(void *instance, const char *key, char *buf, int buf_len) {
             "{\"modes\":null,\"levels\":{"
             "\"root\":{\"name\":\"Weird Dreams\","
             "\"knobs\":[\"cv_vol\",\"cv_pan\",\"cv_freq\",\"cv_decay\",\"cv_wave\",\"cv_mix\",\"cv_cutoff\",\"cv_preset\"],"
-            "\"params\":[{\"level\":\"Patch\",\"label\":\"Patch\"},{\"level\":\"General\",\"label\":\"General\"},{\"level\":\"Voice\",\"label\":\"Voice\"}]},"
+            "\"params\":[{\"level\":\"Patch\",\"label\":\"Patch\"},{\"level\":\"General\",\"label\":\"General\"},{\"level\":\"Voice\",\"label\":\"Voice\"},{\"level\":\"FX\",\"label\":\"FX\"}]},"
             "\"Patch\":{\"label\":\"Patch\","
             "\"knobs\":[\"kit\",\"rnd_kit\",\"rnd_voice\",\"rnd_pitch\",\"same_freq\",\"init_freq\",\"rnd_pan\",\"all_mono\"],"
             "\"params\":[\"kit\",\"rnd_kit\",\"rnd_voice\",\"rnd_pitch\",\"same_freq\",\"init_freq\",\"rnd_pan\",\"all_mono\"]},"
@@ -1890,7 +2290,10 @@ static int get_param(void *instance, const char *key, char *buf, int buf_len) {
             "\"params\":[\"comp\",\"dj_filter\",\"eq_lo\",\"lo_freq\",\"eq_mid\",\"mid_freq\",\"eq_hi\",\"hi_freq\",\"q_lo\",\"q_mid\",\"q_hi\",\"reset_eq\",\"master\"]},"
             "\"Voice\":{\"label\":\"Voice\","
             "\"knobs\":[\"cv_vol\",\"cv_pan\",\"cv_freq\",\"cv_decay\",\"cv_wave\",\"cv_mix\",\"cv_cutoff\",\"cv_preset\"],"
-            "\"params\":[\"cv_vol\",\"cv_pan\",\"cv_freq\",\"cv_attack\",\"cv_decay\",\"cv_wave\",\"cv_penv\",\"cv_prate\",\"cv_lamt\",\"cv_lrate\",\"cv_ftype\",\"cv_cutoff\",\"cv_fres\",\"cv_nattack\",\"cv_ndecay\",\"cv_mix\",\"cv_dist\",\"cv_level\",\"cv_preset\"]}"
+            "\"params\":[\"cv_vol\",\"cv_pan\",\"cv_freq\",\"cv_attack\",\"cv_decay\",\"cv_wave\",\"cv_penv\",\"cv_prate\",\"cv_lamt\",\"cv_lrate\",\"cv_ftype\",\"cv_cutoff\",\"cv_fres\",\"cv_nattack\",\"cv_ndecay\",\"cv_mix\",\"cv_dist\",\"cv_level\",\"cv_preset\",\"cv_rsend\",\"cv_dsend\"]},"
+            "\"FX\":{\"label\":\"FX\","
+            "\"knobs\":[\"rev_mix\",\"rev_type\",\"rev_size\",\"rev_decay\",\"dly_mix\",\"dly_rate\",\"dly_fdbk\",\"dly_tone\"],"
+            "\"params\":[\"rev_mix\",\"rev_type\",\"rev_size\",\"rev_decay\",\"dly_mix\",\"dly_rate\",\"dly_fdbk\",\"dly_tone\"]}"
             "}}";
         int len = (int)strlen(hier);
         if (len >= buf_len) return -1;
@@ -1911,15 +2314,20 @@ static int get_param(void *instance, const char *key, char *buf, int buf_len) {
             inst->master.eq_low_freq, inst->master.eq_mid_freq, inst->master.eq_high_freq,
             inst->master.eq_low_q, inst->master.eq_mid_q, inst->master.eq_high_q,
             inst->master.master_level);
+        /* FX */
+        n += snprintf(buf + n, buf_len - n, "%.4f %d %.4f %.4f %.4f %.4f %.4f %.4f ",
+            inst->reverb.mix, inst->reverb.type, inst->reverb.size, inst->reverb.decay,
+            inst->delay.mix, inst->delay.rate, inst->delay.feedback, inst->delay.tone);
         /* Per-voice */
         for (int i = 0; i < NUM_VOICES; i++) {
             wd_voice_t *v = &inst->voice[i];
             n += snprintf(buf + n, buf_len - n,
-                "%d %.1f %.4f %.4f %.4f %.3f %.4f %.3f %.1f %d %.0f %.2f %.4f %.4f %.3f %.1f %.3f %.2f ",
+                "%d %.1f %.4f %.4f %.4f %.3f %.4f %.3f %.1f %d %.0f %.2f %.4f %.4f %.3f %.1f %.3f %.2f %.4f %.4f ",
                 v->preset, v->freq, v->attack, v->decay, v->wave,
                 v->pitch_env_amt, v->pitch_env_rate, v->pitch_lfo_amt, v->pitch_lfo_rate,
                 v->filter_type, v->filter_cutoff, v->filter_res,
-                v->noise_attack, v->noise_decay, v->mix, v->distortion, v->level, v->pan);
+                v->noise_attack, v->noise_decay, v->mix, v->distortion, v->level, v->pan,
+                v->reverb_send, v->delay_send);
         }
         if (n >= buf_len) n = buf_len - 1;
         return n;
@@ -1956,6 +2364,16 @@ static int get_param(void *instance, const char *key, char *buf, int buf_len) {
     if (strcmp(key, "reset_eq") == 0) return snprintf(buf, buf_len, "0");
     if (strcmp(key, "same_freq") == 0) return snprintf(buf, buf_len, "%d", inst->same_freq > 0 ? (int)inst->same_freq : 0);
     if (strcmp(key, "master") == 0) return snprintf(buf, buf_len, "%.4f", inst->master.master_level);
+
+    /* FX params */
+    if (strcmp(key, "rev_mix") == 0) return snprintf(buf, buf_len, "%.4f", inst->reverb.mix);
+    if (strcmp(key, "rev_type") == 0) return snprintf(buf, buf_len, "%s", REV_TYPE_NAMES[inst->reverb.type]);
+    if (strcmp(key, "rev_size") == 0) return snprintf(buf, buf_len, "%.4f", inst->reverb.size);
+    if (strcmp(key, "rev_decay") == 0) return snprintf(buf, buf_len, "%.4f", inst->reverb.decay);
+    if (strcmp(key, "dly_mix") == 0) return snprintf(buf, buf_len, "%.4f", inst->delay.mix);
+    if (strcmp(key, "dly_rate") == 0) return snprintf(buf, buf_len, "%.4f", inst->delay.rate);
+    if (strcmp(key, "dly_fdbk") == 0) return snprintf(buf, buf_len, "%.4f", inst->delay.feedback);
+    if (strcmp(key, "dly_tone") == 0) return snprintf(buf, buf_len, "%.4f", inst->delay.tone);
 
     /* Per-voice params */
     for (int i = 0; i < NUM_VOICES; i++) {
@@ -1999,6 +2417,10 @@ static int get_param(void *instance, const char *key, char *buf, int buf_len) {
         if (strcmp(key, k) == 0) return snprintf(buf, buf_len, "%.4f", v->level);
         snprintf(k, sizeof(k), "v%d_pan", i+1);
         if (strcmp(key, k) == 0) return snprintf(buf, buf_len, "%.4f", v->pan);
+        snprintf(k, sizeof(k), "v%d_rsend", i+1);
+        if (strcmp(key, k) == 0) return snprintf(buf, buf_len, "%.4f", v->reverb_send);
+        snprintf(k, sizeof(k), "v%d_dsend", i+1);
+        if (strcmp(key, k) == 0) return snprintf(buf, buf_len, "%.4f", v->delay_send);
     }
 
     /* Virtual cv_* params — redirect to current voice */
@@ -2025,6 +2447,8 @@ static int get_param(void *instance, const char *key, char *buf, int buf_len) {
         if (strcmp(suffix, "ndecay") == 0) return snprintf(buf, buf_len, "%.4f", v->noise_decay);
         if (strcmp(suffix, "dist") == 0) return snprintf(buf, buf_len, "%.4f", v->distortion);
         if (strcmp(suffix, "level") == 0) return snprintf(buf, buf_len, "%.4f", v->level);
+        if (strcmp(suffix, "rsend") == 0) return snprintf(buf, buf_len, "%.4f", v->reverb_send);
+        if (strcmp(suffix, "dsend") == 0) return snprintf(buf, buf_len, "%.4f", v->delay_send);
     }
 
     return -1;
@@ -2040,23 +2464,37 @@ static void render_block(void *instance, int16_t *out_lr, int frames) {
 
     for (int i = 0; i < frames; i++) {
         float mix_l = 0.0f, mix_r = 0.0f;
+        float rev_in = 0.0f, dly_in = 0.0f;
 
         for (int v = 0; v < NUM_VOICES; v++) {
             float vol = onepole(&inst->voice_vol_smooth[v], inst->voice_vol[v], 0.002f);
             float pan = onepole(&inst->voice_pan_smooth[v], inst->voice[v].pan, 0.002f);
             float sample = voice_render_sample(&inst->voice[v]) * vol;
-            /* Constant-power panning: L = cos(angle), R = sin(angle) */
-            float angle = (pan + 1.0f) * 0.25f * 3.14159265f; /* 0..pi/2 */
+            /* Constant-power panning */
+            float angle = (pan + 1.0f) * 0.25f * 3.14159265f;
             mix_l += sample * cosf(angle);
             mix_r += sample * sinf(angle);
+            /* Send buses (pre-pan mono) */
+            rev_in += sample * inst->voice[v].reverb_send;
+            dly_in += sample * inst->voice[v].delay_send;
         }
 
         /* Scale down (8 voices) */
         mix_l *= 0.35f;
         mix_r *= 0.35f;
+        rev_in *= 0.35f;
+        dly_in *= 0.35f;
+
+        /* Process stereo reverb and delay */
+        float rev_l, rev_r, dly_l, dly_r;
+        reverb_process_stereo(&inst->reverb, rev_in, &rev_l, &rev_r);
+        delay_process_stereo(&inst->delay, dly_in, &dly_l, &dly_r);
+
+        /* Mix FX returns into stereo bus */
+        mix_l += rev_l * inst->reverb.mix + dly_l * inst->delay.mix;
+        mix_r += rev_r * inst->reverb.mix + dly_r * inst->delay.mix;
 
         /* Master FX (process L and R independently) */
-        /* Use a single mono master for simplicity — average then re-spread */
         float mono = (mix_l + mix_r) * 0.5f;
         float stereo_diff = mix_l - mix_r;
         mono = master_process(&inst->master, mono);
