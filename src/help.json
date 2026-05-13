@@ -1,0 +1,185 @@
+{
+  "title": "Weird Dreams",
+  "children": [
+    {
+      "title": "About",
+      "lines": [
+        "8-voice analog drum",
+        "machine: 64 kits, 41",
+        "voice presets, dynamic",
+        "pad-selected voice",
+        "editing, master bus FX.",
+        "",
+        "DSP ported from",
+        "WeirdDrums",
+        "(dfilaretti, MIT)."
+      ]
+    },
+    {
+      "title": "Pads",
+      "lines": [
+        "Notes 36-43 (bot 8):",
+        " V1-V8 triggers",
+        "",
+        "Notes 44-51 (top 8):",
+        " mirror of V1-V8",
+        "",
+        "Other notes round-",
+        "robin across voices.",
+        "",
+        "Note-on also selects",
+        "current voice for",
+        "the Voice page",
+        "(dynamic editing)."
+      ]
+    },
+    {
+      "title": "Page: Patch",
+      "lines": [
+        "K1 Kit (0-63)",
+        "K2 Rnd Kit",
+        "K3 Rnd Voice",
+        "K4 Rnd Pitch",
+        "    musical scale to",
+        "    all voices",
+        "K5 SameFreq",
+        "    one master freq",
+        "    for osc + filter",
+        "K6 Init Freq",
+        "    restore kit defs",
+        "K7 Rnd Pan",
+        "    (kicks center)",
+        "K8 All Mono",
+        "",
+        "Menu-only:",
+        " Save Kit (Play/Save)"
+      ]
+    },
+    {
+      "title": "Page: Voice",
+      "lines": [
+        "Per-voice editing for",
+        "the currently selected",
+        "voice (last pad hit).",
+        "",
+        "K1 Volume",
+        "K2 Pan",
+        "K3 Freq 20-20000 Hz",
+        "K4 Decay",
+        "K5 Wave morph",
+        "    Sine>Tri>Saw>Sqr",
+        "K6 Mix osc/noise",
+        "K7 Cutoff (SVF)",
+        "K8 Preset 0-40",
+        "",
+        "Menu-only:",
+        " Attack, P.Env,",
+        " P.Rate, LFO Amt/Rate,",
+        " F.Type, Reso,",
+        " N.Atk, N.Dec, Dist,",
+        " Level, Rev Send,",
+        " Dly Send"
+      ]
+    },
+    {
+      "title": "Page: General",
+      "lines": [
+        "Master bus FX.",
+        "",
+        "K1 Crush (clean comp",
+        "    > dirty saturate)",
+        "K2 DJ Filter",
+        "    LP < center > HP",
+        "K3-K8 3-band EQ",
+        "    Lo / Mid / Hi",
+        "    gain + freq pairs",
+        "",
+        "Menu-only:",
+        " Lo Q, Mid Q, Hi Q,",
+        " Reset EQ, Master"
+      ]
+    },
+    {
+      "title": "Page: FX",
+      "lines": [
+        "K1 Rev Mix",
+        "K2 Rev Type",
+        "    Club / Garage /",
+        "    Studio",
+        "K3 Rev Size",
+        "K4 Rev Decay",
+        "K5 Dly Mix",
+        "K6 Dly Rate",
+        "    10-1000 ms (exp)",
+        "K7 Dly Fdbk 0-95%",
+        "K8 Dly Tone",
+        "    Dark<Clean>Brite",
+        "",
+        "Stereo ping-pong",
+        "delay; Schroeder",
+        "reverb with split",
+        "L/R combs."
+      ]
+    },
+    {
+      "title": "MIDI CC",
+      "lines": [
+        "For upstream MIDI FX",
+        "(e.g. Euclidrum):",
+        "",
+        "CC 70-77 -> V1-V8 freq",
+        "CC 80-87 -> V1-V8 decay",
+        "",
+        "CC handled BEFORE note-",
+        "on in the same block,",
+        "so per-hit freq/decay",
+        "set lands on the next",
+        "trigger."
+      ]
+    },
+    {
+      "title": "Save Kit",
+      "lines": [
+        "Menu-only enum on the",
+        "Patch page. Select",
+        "'Save' to write the",
+        "current 8 voice",
+        "presets + volumes +",
+        "pans into the current",
+        "kit slot.",
+        "",
+        "Stored in",
+        "/data/UserData/",
+        "schwung/",
+        "weird_dreams_kits.dat",
+        "(binary, 64 slots).",
+        "",
+        "Auto-resets to 'Play'",
+        "after saving."
+      ]
+    },
+    {
+      "title": "Tips",
+      "lines": [
+        "Hit a pad then twist",
+        " K1-K8 on Voice page",
+        " to edit that voice",
+        " in real time.",
+        "",
+        "Rnd Voice keeps the",
+        " other 7 voices",
+        " intact.",
+        "",
+        "Crush past 50% adds",
+        " progressive tanh",
+        " saturation to the",
+        " bus comp.",
+        "",
+        "DJ Filter has a dead",
+        " zone at noon (49-",
+        " 51%) so center =",
+        " bypass."
+      ]
+    }
+  ]
+}

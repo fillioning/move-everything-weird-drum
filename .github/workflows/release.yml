@@ -41,6 +41,7 @@ jobs:
             src/dsp/weird_dreams.c \
             -lm
           cp src/module.json dist/weird-dreams/
+          if [ -f src/help.json ]; then cp src/help.json dist/weird-dreams/; fi
           if [ -d chain_patches ]; then
             cp -r chain_patches dist/weird-dreams/
           fi
